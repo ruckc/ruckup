@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -34,9 +35,18 @@ pub struct GithubActionsPlugin {
 
 impl GithubActionsPlugin {
     pub fn new() -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            let value = format!("Bearer {token}")
+                .parse()
+                .expect("invalid GITHUB_TOKEN header value");
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
+
         Self {
             client: reqwest::Client::builder()
                 .user_agent("ruckup/0.1.0")
+                .default_headers(headers)
                 .build()
                 .expect("failed to build HTTP client"),
         }
@@ -170,20 +180,49 @@ async fn fetch_latest(client: &reqwest::Client, repo: &str) -> Result<String> {
     }
 
     let tag_url = format!("https://api.github.com/repos/{repo}/tags?per_page=1");
-    let tags: Vec<GithubTag> = client
+    let response = client
         .get(&tag_url)
         .header("Accept", "application/vnd.github+json")
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await?;
 
-    if let Some(tag) = tags.into_iter().next() {
-        Ok(tag.name)
-    } else {
-        bail!("no published tags found")
+    if response.status().is_success() {
+        let tags: Vec<GithubTag> = response.json().await?;
+        if let Some(tag) = tags.into_iter().next() {
+            return Ok(tag.name);
+        }
     }
+
+    fetch_latest_git_tag(repo)
+}
+
+fn fetch_latest_git_tag(repo: &str) -> Result<String> {
+    let remote = format!("https://github.com/{repo}");
+    let output = Command::new("git")
+        .args(["ls-remote", "--tags", "--refs", "--sort=-version:refname", &remote])
+        .output()
+        .with_context(|| format!("failed to run git ls-remote for {repo}"))?;
+
+    if !output.status.success() {
+        bail!(
+            "git ls-remote failed for {repo}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .with_context(|| format!("invalid utf-8 from git ls-remote for {repo}"))?;
+    let line = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("no published tags found"))?;
+    let tag = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.strip_prefix("refs/tags/"))
+        .ok_or_else(|| anyhow::anyhow!("failed to parse tag output"))?;
+
+    Ok(tag.to_string())
 }
 
 fn rewrite_uses_line(line: &str, updates: &std::collections::HashMap<&str, &str>) -> String {
