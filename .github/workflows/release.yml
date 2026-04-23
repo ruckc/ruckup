@@ -132,6 +132,9 @@ jobs:
           # Cargo manifest
           sed -i -E '0,/^version = "[^"]+"/s//version = "'"${version}"'"/' Cargo.toml
 
+          # Keep lock file aligned with the workspace package version.
+          cargo update -w
+
       - name: Commit and push bumped version
         run: |
           set -euo pipefail
@@ -139,6 +142,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add Cargo.toml
+          git add Cargo.lock
 
           if git diff --cached --quiet; then
             echo "No version changes to commit"
