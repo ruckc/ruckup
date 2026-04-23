@@ -163,15 +163,18 @@ jobs:
         include:
           - name: Linux & Windows
             os: ubuntu-latest
-            target_flags: --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --target x86_64-pc-windows-gnu
+            rust_targets: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu
+            build_command: cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --target x86_64-pc-windows-gnu
             zigbuild: true
           - name: macOS
             os: macos-latest
-            target_flags: --target x86_64-apple-darwin --target aarch64-apple-darwin
+            rust_targets: x86_64-apple-darwin aarch64-apple-darwin
+            build_command: cargo zigbuild --release --locked --target x86_64-apple-darwin --target aarch64-apple-darwin
             zigbuild: true
           - name: Windows ARM64
             os: windows-latest
-            target_flags: --target aarch64-pc-windows-msvc
+            rust_targets: aarch64-pc-windows-msvc
+            build_command: cargo build --release --locked --target aarch64-pc-windows-msvc
             zigbuild: false
     runs-on: ${{ matrix.os }}
 
@@ -194,20 +197,13 @@ jobs:
         run: cargo install --locked cargo-zigbuild
 
       - name: Add Rust cross-compile targets
-        run: rustup target add $(echo '${{ matrix.target_flags }}' | grep -oP '(?<=--target )\S+')
+        run: rustup target add ${{ matrix.rust_targets }}
 
       - name: Test (native)
         run: cargo test --all-targets --locked
 
-      - name: Build release binaries (zigbuild)
-        if: ${{ matrix.zigbuild }}
-        run: |
-          cargo zigbuild --release --locked ${{ matrix.target_flags }}
-
-      - name: Build release binaries (native)
-        if: ${{ !matrix.zigbuild }}
-        run: |
-          cargo build --release --locked ${{ matrix.target_flags }}
+      - name: Build release binaries
+        run: ${{ matrix.build_command }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7.0.1
