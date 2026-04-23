@@ -1,0 +1,336 @@
+name: Manual Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: "Optional explicit version override (x.y.z). Leave empty for auto bump"
+        required: false
+        default: ""
+        type: string
+      # python_path: uncomment when enabling PyPI publishing
+      # python_path:
+      #   description: Path to Python package directory (must contain pyproject.toml)
+      #   required: false
+      #   default: .
+      #   type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  prepare:
+    name: Prepare version and tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      bump_type: ${{ steps.version.outputs.bump_type }}
+      last_tag: ${{ steps.version.outputs.last_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute release version from commits
+        id: version
+        run: |
+          set -euo pipefail
+
+          current_version=$(grep '^version = ' Cargo.toml | head -n1 | sed -E 's/version = "([^"]+)"/\1/')
+          if ! [[ "${current_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Current Cargo.toml version must be SemVer in x.y.z format"
+            exit 1
+          fi
+
+          version_override='${{ github.event.inputs.version_override }}'
+          if [[ -n "${version_override}" ]]; then
+            if ! [[ "${version_override}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "version_override must be SemVer in x.y.z format"
+              exit 1
+            fi
+            next_version="${version_override}"
+            bump_type="override"
+            last_tag=$(git tag --list 'v*' --sort=-version:refname | head -n1 || true)
+          else
+            last_tag=$(git tag --list 'v*' --sort=-version:refname | head -n1 || true)
+
+            if [[ -n "${last_tag}" ]]; then
+              commits=$(git log --format='%s%n%b' "${last_tag}..HEAD")
+              commit_subjects=$(git log --no-merges --format='%s' "${last_tag}..HEAD")
+            else
+              commits=$(git log --format='%s%n%b')
+              commit_subjects=$(git log --no-merges --format='%s')
+            fi
+
+            if [[ -z "${commits}" ]]; then
+              echo "No commits found to evaluate for version bump"
+              exit 1
+            fi
+
+            invalid_subjects=$(echo "${commit_subjects}" | grep -E -v '^(feat|fix|perf|refactor|docs|style|test|build|ci|chore|revert)(\([a-zA-Z0-9._/-]+\))?!?: .+' || true)
+            if [[ -n "${invalid_subjects}" ]]; then
+              echo "Release blocked: commit subjects must follow Conventional Commits."
+              echo "Invalid commit subjects since ${last_tag:-initial commit}:"
+              echo "${invalid_subjects}"
+              exit 1
+            fi
+
+            bump_type="patch"
+            if echo "${commits}" | grep -Eq '(^|\n)([^\n]+!:[^\n]*|BREAKING CHANGE:)'; then
+              bump_type="major"
+            elif echo "${commits}" | grep -Eq '(^|\n)feat(\([^\n)]*\))?:'; then
+              bump_type="minor"
+            fi
+
+            IFS='.' read -r major minor patch <<< "${current_version}"
+            case "${bump_type}" in
+              major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+              minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+              patch)
+                patch=$((patch + 1))
+                ;;
+            esac
+            next_version="${major}.${minor}.${patch}"
+          fi
+
+          if [[ "${next_version}" == "${current_version}" ]]; then
+            echo "Computed release version matches current version; refusing to release without a bump"
+            exit 1
+          fi
+
+          tag="v${next_version}"
+          echo "current_version=${current_version}" >> "$GITHUB_OUTPUT"
+          echo "version=${next_version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "bump_type=${bump_type}" >> "$GITHUB_OUTPUT"
+          echo "last_tag=${last_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure tag does not already exist
+        run: |
+          set -euo pipefail
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.version.outputs.tag }} already exists"
+            exit 1
+          fi
+
+      - name: Bump project versions
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+
+          # Cargo manifest
+          sed -i -E '0,/^version = "[^"]+"/s//version = "'"${version}"'"/' Cargo.toml
+
+      - name: Commit and push bumped version
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Cargo.toml
+
+          if git diff --cached --quiet; then
+            echo "No version changes to commit"
+          else
+            git commit -m "chore(release): ${{ steps.version.outputs.tag }}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Create and push release tag
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare
+    strategy:
+      matrix:
+        include:
+          - name: Linux & Windows
+            os: ubuntu-latest
+            target_flags: --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --target x86_64-pc-windows-gnu
+            zigbuild: true
+          - name: macOS
+            os: macos-latest
+            target_flags: --target x86_64-apple-darwin --target aarch64-apple-darwin
+            zigbuild: true
+          - name: Windows ARM64
+            os: windows-latest
+            target_flags: --target aarch64-pc-windows-msvc
+            zigbuild: false
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install zig (for cross-compilation)
+        if: matrix.zigbuild
+        run: pip install ziglang
+
+      - name: Install cargo-zigbuild
+        if: matrix.zigbuild
+        run: cargo install --locked cargo-zigbuild
+
+      - name: Add Rust cross-compile targets
+        run: rustup target add $(echo '${{ matrix.target_flags }}' | grep -oP '(?<=--target )\S+')
+
+      - name: Test (native)
+        run: cargo test --all-targets --locked
+
+      - name: Build release binaries (zigbuild)
+        if: ${{ matrix.zigbuild }}
+        run: |
+          cargo zigbuild --release --locked ${{ matrix.target_flags }}
+
+      - name: Build release binaries (native)
+        if: ${{ !matrix.zigbuild }}
+        run: |
+          cargo build --release --locked ${{ matrix.target_flags }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}
+          path: target/*/release/ruckup*
+          if-no-files-found: error
+
+  publish:
+    name: Tag, release, and publish
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Reconstruct target directory and list binaries
+        run: |
+          set -euo pipefail
+
+          copy_if_exists() {
+            local src="$1" dst="$2"
+            if [[ -f "$src" ]]; then
+              mkdir -p "$(dirname "$dst")"
+              cp "$src" "$dst"
+            fi
+          }
+
+          for triple in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
+            x86_64-pc-windows-gnu
+          do
+            copy_if_exists "artifacts/binaries-ubuntu-latest/$triple/release/ruckup" "target/$triple/release/ruckup"
+            copy_if_exists "artifacts/binaries-ubuntu-latest/$triple/release/ruckup.exe" "target/$triple/release/ruckup.exe"
+          done
+
+          for triple in x86_64-apple-darwin aarch64-apple-darwin; do
+            copy_if_exists "artifacts/binaries-macos-latest/$triple/release/ruckup" "target/$triple/release/ruckup"
+          done
+
+          copy_if_exists \
+            "artifacts/binaries-windows-latest/aarch64-pc-windows-msvc/release/ruckup.exe" \
+            "target/aarch64-pc-windows-msvc/release/ruckup.exe"
+
+          echo "=== Available binaries ==="
+          find target -path '*/release/ruckup*' -type f
+
+      # TODO: enable npm publishing
+      - name: Set up Node
+        if: false
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Install cargo-npm
+        if: false
+        run: cargo install --locked cargo-npm
+
+      - name: Generate npm packages
+        if: false
+        run: cargo npm generate
+
+      - name: Publish npm packages
+        if: false
+        run: cargo npm publish -- --provenance --access public
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Authenticate to crates.io (trusted publishing)
+        id: crates_auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crate to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates_auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          cargo publish --locked
+
+      # TODO: enable PyPI publishing
+      - name: Set up Python
+        if: false
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build Python distribution
+        if: false
+        working-directory: .
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip maturin
+          maturin build --release
+
+      - name: Publish package to PyPI
+        if: false
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            target/*/release/ruckup*
+
+      - name: Print release summary
+        run: |
+          echo "Released version: ${{ needs.prepare.outputs.version }}"
+          echo "Tag: ${{ needs.prepare.outputs.tag }}"
+          echo "Bump type: ${{ needs.prepare.outputs.bump_type }}"
+          echo "Previous tag: ${{ needs.prepare.outputs.last_tag }}"

@@ -1,0 +1,22 @@
+name: Commit Lint
+
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  lint-commits:
+    name: Conventional commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lint commit messages
+        uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: commitlint.config.cjs

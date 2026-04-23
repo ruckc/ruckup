@@ -1,0 +1,45 @@
+[package]
+name = "ruckup"
+version = "0.3.0"
+edition = "2024"
+description = "Check and update dependencies across Cargo, npm, and pyproject projects"
+license = "MIT"
+repository = "https://github.com/ruckc/ruckup"
+
+[dependencies]
+anyhow = "1.0.102"
+async-trait = "0.1.89"
+clap = { version = "4.6.1", features = ["derive"] }
+colored = "3.1.1"
+dialoguer = "0.12.0"
+dirs = "6.0.0"
+futures = "0.3"
+indicatif = "0.18.4"
+node-semver = "2.2.0"
+pep440_rs = "0.7.3"
+reqwest = { version = "0.13.2", features = ["json"] }
+semver = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.52.0", features = ["full"] }
+toml = "1.1.2"
+toml_edit = "0.25.11"
+
+[package.metadata.npm]
+name = "ruckup"
+bins = ["ruckup"]
+prefix = "@ruckc/ruckup-"
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-gnu",
+  "aarch64-pc-windows-msvc",
+]
+
+[dev-dependencies]
+cargo-npm = "0.1.1"
+cargo-zigbuild = "0.22.2"
