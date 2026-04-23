@@ -161,17 +161,42 @@ jobs:
     strategy:
       matrix:
         include:
-          - name: Linux & Windows
+          - name: Linux x64 glibc
             os: ubuntu-latest
-            rust_targets: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu
-            build_command: cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --target x86_64-pc-windows-gnu
+            rust_targets: x86_64-unknown-linux-gnu
+            build_command: cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu
             zigbuild: true
-          - name: macOS
+          - name: Linux arm64 glibc
+            os: ubuntu-latest
+            rust_targets: aarch64-unknown-linux-gnu
+            build_command: cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu
+            zigbuild: true
+          - name: Linux x64 musl
+            os: ubuntu-latest
+            rust_targets: x86_64-unknown-linux-musl
+            build_command: cargo zigbuild --release --locked --target x86_64-unknown-linux-musl
+            zigbuild: true
+          - name: Linux arm64 musl
+            os: ubuntu-latest
+            rust_targets: aarch64-unknown-linux-musl
+            build_command: cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
+            zigbuild: true
+          - name: macOS x64
             os: macos-latest
-            rust_targets: x86_64-apple-darwin aarch64-apple-darwin
-            build_command: cargo zigbuild --release --locked --target x86_64-apple-darwin --target aarch64-apple-darwin
-            zigbuild: true
-          - name: Windows ARM64
+            rust_targets: x86_64-apple-darwin
+            build_command: cargo build --release --locked --target x86_64-apple-darwin
+            zigbuild: false
+          - name: macOS arm64
+            os: macos-latest
+            rust_targets: aarch64-apple-darwin
+            build_command: cargo build --release --locked --target aarch64-apple-darwin
+            zigbuild: false
+          - name: Windows x64
+            os: windows-latest
+            rust_targets: x86_64-pc-windows-msvc
+            build_command: cargo build --release --locked --target x86_64-pc-windows-msvc
+            zigbuild: false
+          - name: Windows arm64
             os: windows-latest
             rust_targets: aarch64-pc-windows-msvc
             build_command: cargo build --release --locked --target aarch64-pc-windows-msvc
@@ -208,7 +233,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: binaries-${{ matrix.os }}
+          name: binaries-${{ matrix.rust_targets }}
           path: target/*/release/ruckup*
           if-no-files-found: error
 
@@ -242,19 +267,21 @@ jobs:
             x86_64-unknown-linux-gnu \
             aarch64-unknown-linux-gnu \
             x86_64-unknown-linux-musl \
-            aarch64-unknown-linux-musl \
-            x86_64-pc-windows-gnu
+            aarch64-unknown-linux-musl
           do
-            copy_if_exists "artifacts/binaries-ubuntu-latest/$triple/release/ruckup" "target/$triple/release/ruckup"
-            copy_if_exists "artifacts/binaries-ubuntu-latest/$triple/release/ruckup.exe" "target/$triple/release/ruckup.exe"
+            copy_if_exists "artifacts/binaries-$triple/$triple/release/ruckup" "target/$triple/release/ruckup"
           done
 
           for triple in x86_64-apple-darwin aarch64-apple-darwin; do
-            copy_if_exists "artifacts/binaries-macos-latest/$triple/release/ruckup" "target/$triple/release/ruckup"
+            copy_if_exists "artifacts/binaries-$triple/$triple/release/ruckup" "target/$triple/release/ruckup"
           done
 
           copy_if_exists \
-            "artifacts/binaries-windows-latest/aarch64-pc-windows-msvc/release/ruckup.exe" \
+            "artifacts/binaries-x86_64-pc-windows-msvc/x86_64-pc-windows-msvc/release/ruckup.exe" \
+            "target/x86_64-pc-windows-msvc/release/ruckup.exe"
+
+          copy_if_exists \
+            "artifacts/binaries-aarch64-pc-windows-msvc/aarch64-pc-windows-msvc/release/ruckup.exe" \
             "target/aarch64-pc-windows-msvc/release/ruckup.exe"
 
           echo "=== Available binaries ==="
