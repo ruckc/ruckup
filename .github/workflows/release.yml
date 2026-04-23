@@ -8,12 +8,6 @@ on:
         required: false
         default: ""
         type: string
-      # python_path: uncomment when enabling PyPI publishing
-      # python_path:
-      #   description: Path to Python package directory (must contain pyproject.toml)
-      #   required: false
-      #   default: .
-      #   type: string
 
 permissions:
   contents: write
@@ -325,23 +319,66 @@ jobs:
         if: false
         run: cargo npm publish -- --provenance --access public
 
-      # TODO: enable PyPI publishing
       - name: Set up Python
-        if: false
         uses: actions/setup-python@v6.2.0
         with:
           python-version: '3.12'
 
+      - name: Generate pyproject.toml from Cargo.toml
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          cargo = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          pkg = cargo.get("package", {})
+
+          name = pkg.get("name", "ruckup")
+          version = pkg.get("version", "0.0.0")
+          description = pkg.get("description", "")
+          license_name = pkg.get("license", "MIT")
+          repository = pkg.get("repository", "")
+
+          lines = [
+            "[build-system]",
+            'requires = ["maturin>=1.5,<2.0"]',
+            'build-backend = "maturin"',
+            "",
+            "[project]",
+            f'name = "{name}"',
+            f'version = "{version}"',
+            f'description = "{description}"',
+            'readme = "README.md"',
+            'requires-python = ">=3.8"',
+            f'license = {{ text = "{license_name}" }}',
+            "classifiers = [",
+            '  "Programming Language :: Python :: 3",',
+            '  "Programming Language :: Rust",',
+            '  "License :: OSI Approved :: MIT License",',
+            "]",
+          ]
+
+          if repository:
+            lines.append(f'urls = {{ Homepage = "{repository}", Repository = "{repository}" }}')
+
+          lines.extend([
+            "",
+            "[tool.maturin]",
+            'binaries = ["ruckup"]',
+            "",
+          ])
+
+          Path("pyproject.toml").write_text("\n".join(lines), encoding="utf-8")
+          PY
+
       - name: Build Python distribution
-        if: false
-        working-directory: .
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip maturin
           maturin build --release
 
       - name: Publish package to PyPI
-        if: false
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
