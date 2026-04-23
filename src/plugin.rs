@@ -91,7 +91,8 @@ pub trait Plugin: Send + Sync {
 
     /// Returns true if the manifest file exists in `dir`.
     fn detect(&self, dir: &Path) -> bool {
-        dir.join(self.file_name()).is_file()
+        let path = dir.join(self.file_name());
+        path.is_file() || path.is_dir()
     }
 
     /// Display name for headers, can include extra context (e.g. detected lock file).

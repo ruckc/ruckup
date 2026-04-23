@@ -4,6 +4,7 @@
 
 Today it supports:
 - Rust crates in `Cargo.toml`
+- GitHub Actions in `.github/workflows/*.yml`
 - JavaScript dependencies in `package.json`
 - Python dependencies in `pyproject.toml`
 
@@ -16,7 +17,7 @@ It is useful for repos that mix Rust, Node, and Python tooling and want one plac
 ## Features
 
 - Auto-detects supported manifest files in the current directory
-- Checks latest versions from crates.io, npm, and PyPI
+- Checks latest versions from crates.io, GitHub Actions, npm, and PyPI
 - Preserves dependency groups such as normal, dev, build, and optional
 - Supports interactive updates with multi-select prompts
 - Understands npm peer dependency constraints and shows when packages are held back
@@ -31,6 +32,11 @@ It is useful for repos that mix Rust, Node, and Python tooling and want one plac
   - `[dependencies]`
   - `[dev-dependencies]`
   - `[build-dependencies]`
+
+### GitHub Actions
+- `.github/workflows/*.yml`
+- scans `uses: owner/repo@ref` and `uses: owner/repo/path@ref`
+- ignores local actions such as `./action` and `docker://` actions
 
 ### npm / pnpm / yarn
 - `package.json`
@@ -75,7 +81,7 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -o, --only <ONLY>      Only check these specific package managers (cargo, npm, pyproject)
+  -o, --only <ONLY>      Only check these specific package managers (cargo, github-actions, npm, pyproject)
   -f, --filter <FILTER>  Filter to specific dependency names
   -h, --help             Print help
   -V, --version          Print version
@@ -93,6 +99,12 @@ Check only Cargo dependencies:
 
 ```bash
 ruckup --only cargo
+```
+
+Check only GitHub Actions versions:
+
+```bash
+ruckup check --only github-actions
 ```
 
 Check only npm dependencies matching a package name:
@@ -176,6 +188,7 @@ RUCKUP_NPM_CONCURRENCY=8 ruckup check --only npm
 
 - `check` is the default command, so `ruckup` and `ruckup check` are equivalent.
 - npm results include peer dependency conflict reporting so you can see what is blocking an upgrade.
+- GitHub Actions updates rewrite pinned `uses: owner/repo@ref` workflow references; floating refs like `stable` and `release/v1` are left alone.
 - Python dependency detection only activates for `pyproject.toml` files that actually declare Python dependencies.
 
 ## Release Status

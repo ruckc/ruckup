@@ -13,12 +13,14 @@ use dialoguer::MultiSelect;
 use cli::{Cli, Commands};
 use plugin::{Dependency, Plugin};
 use plugins::cargo::CargoPlugin;
+use plugins::github_actions::GithubActionsPlugin;
 use plugins::npm::NpmPlugin;
 use plugins::pyproject::PyprojectPlugin;
 
 fn all_plugins() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(CargoPlugin::new()),
+        Box::new(GithubActionsPlugin::new()),
         Box::new(NpmPlugin::new()),
         Box::new(PyprojectPlugin::new()),
     ]
@@ -33,6 +35,7 @@ fn detect_plugins(dir: &PathBuf, only: &Option<Vec<String>>) -> Vec<Box<dyn Plug
                 names.iter().any(|n| {
                     let n = n.to_ascii_lowercase();
                     n == p.name().to_ascii_lowercase()
+                        || n == "actions" && p.name() == "github-actions"
                         || n == "pnpm" && p.name() == "npm"
                         || n == "yarn" && p.name() == "npm"
                 })
