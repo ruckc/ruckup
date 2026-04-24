@@ -402,6 +402,8 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip maturin
           maturin build --release
+          mkdir -p dist
+          cp target/wheels/*.whl dist/
 
       - name: Publish package to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
