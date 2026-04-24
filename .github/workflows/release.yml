@@ -313,10 +313,13 @@ jobs:
             target/x86_64-unknown-linux-gnu/release/ruckup \
             target/x86_64-unknown-linux-musl/release/ruckup
           do
-            if [[ ! -x "${bin}" ]]; then
-              echo "Expected executable binary at ${bin}"
+            if [[ ! -f "${bin}" ]]; then
+              echo "Expected binary at ${bin}"
               exit 1
             fi
+
+            # Artifact downloads may not preserve executable mode bits.
+            chmod +x "${bin}"
             "${bin}" --version >/dev/null
           done
 
