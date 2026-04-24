@@ -11,7 +11,8 @@ fn list_detects_requirements_txt() {
     .expect("failed to write requirements.txt");
 
     let mut cmd = Command::cargo_bin("ruckup").expect("failed to load ruckup binary");
-    cmd.current_dir(temp.path()).args(["list", "--only", "requirements"]);
+    cmd.current_dir(temp.path())
+        .args(["list", "--only", "requirements"]);
 
     cmd.assert()
         .success()

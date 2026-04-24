@@ -473,8 +473,7 @@ impl Plugin for PyprojectPlugin {
             .and_then(|g| g.as_table_mut())
         {
             for (_group, entry) in groups.iter_mut() {
-                if let Some(table) = entry.get_mut("dependencies").and_then(|d| d.as_table_mut())
-                {
+                if let Some(table) = entry.get_mut("dependencies").and_then(|d| d.as_table_mut()) {
                     update_poetry_table(table, &to_update, preserve_range);
                 }
             }
@@ -574,7 +573,13 @@ lint = ["ruff>=0.11"]
 
     #[test]
     fn version_prefix_preservation_matches_existing_behavior() {
-        assert_eq!(version_with_preserved_prefix("^2.0", "3.1.4", true), "^3.1.4");
-        assert_eq!(version_with_preserved_prefix("^2.0", "3.1.4", false), "3.1.4");
+        assert_eq!(
+            version_with_preserved_prefix("^2.0", "3.1.4", true),
+            "^3.1.4"
+        );
+        assert_eq!(
+            version_with_preserved_prefix("^2.0", "3.1.4", false),
+            "3.1.4"
+        );
     }
 }
