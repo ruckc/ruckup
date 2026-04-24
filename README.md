@@ -7,6 +7,7 @@ Today it supports:
 - GitHub Actions in `.github/workflows/*.yml`
 - JavaScript dependencies in `package.json`
 - Python dependencies in `pyproject.toml`
+- Python dependencies in `requirements.txt`
 
 It is useful for repos that mix Rust, Node, and Python tooling and want one place to:
 - list detected dependencies
@@ -52,6 +53,15 @@ It is useful for repos that mix Rust, Node, and Python tooling and want one plac
   - `[project.optional-dependencies]`
   - `[tool.uv.dev-dependencies]`
   - `[dependency-groups]`
+  - `[tool.poetry.dependencies]`
+  - `[tool.poetry.dev-dependencies]`
+  - `[tool.poetry.group.<name>.dependencies]`
+- `requirements.txt`
+- supported line forms:
+  - `package==1.2.3`
+  - `package>=1.2`
+  - `package[extra]>=1.2 ; python_version >= '3.10'`
+  - unpinned packages like `package`
 
 ## Installation
 
@@ -81,7 +91,7 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -o, --only <ONLY>      Only check these specific package managers (cargo, github-actions, npm, pyproject)
+  -o, --only <ONLY>      Only check these specific package managers (cargo, github-actions, npm, pyproject, requirements)
   -f, --filter <FILTER>  Filter to specific dependency names
   -h, --help             Print help
   -V, --version          Print version
@@ -135,6 +145,12 @@ Check only Python dependencies:
 
 ```bash
 ruckup check --only pyproject
+
+Check only `requirements.txt` dependencies:
+
+```bash
+ruckup check --only requirements
+```
 ```
 
 Filter multiple ecosystems or names with comma-separated values:
@@ -194,6 +210,7 @@ RUCKUP_GITHUB_ACTIONS_CONCURRENCY=4 ruckup check --only github-actions
 - npm results include peer dependency conflict reporting so you can see what is blocking an upgrade.
 - GitHub Actions updates rewrite pinned `uses: owner/repo@ref` workflow references; floating refs like `stable` and `release/v1` are left alone.
 - Python dependency detection only activates for `pyproject.toml` files that actually declare Python dependencies.
+- `requirements.txt` support is intentionally scoped to standard package spec lines; pip directives, editable installs, and direct URL requirements are ignored.
 
 ## Release Status
 

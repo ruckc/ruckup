@@ -10,7 +10,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// Only check these specific package managers (cargo, github-actions, npm, pyproject)
+    /// Only check these specific package managers (cargo, github-actions, npm, pyproject, requirements)
     #[arg(short, long, value_delimiter = ',', global = true)]
     pub only: Option<Vec<String>>,
 

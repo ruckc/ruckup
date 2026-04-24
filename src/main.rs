@@ -18,6 +18,7 @@ use plugins::cargo::CargoPlugin;
 use plugins::github_actions::GithubActionsPlugin;
 use plugins::npm::NpmPlugin;
 use plugins::pyproject::PyprojectPlugin;
+use plugins::requirements::RequirementsPlugin;
 
 fn all_plugins() -> Vec<Box<dyn Plugin>> {
     vec![
@@ -25,6 +26,7 @@ fn all_plugins() -> Vec<Box<dyn Plugin>> {
         Box::new(GithubActionsPlugin::new()),
         Box::new(NpmPlugin::new()),
         Box::new(PyprojectPlugin::new()),
+        Box::new(RequirementsPlugin::new()),
     ]
 }
 

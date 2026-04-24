@@ -71,6 +71,49 @@ fn parse_pyproject(dir: &Path) -> Result<toml::Value> {
     Ok(doc)
 }
 
+fn has_supported_pyproject_dependencies(doc: &toml::Value) -> bool {
+    doc.get("project")
+        .and_then(|p| p.get("dependencies"))
+        .is_some()
+        || doc
+            .get("project")
+            .and_then(|p| p.get("optional-dependencies"))
+            .is_some()
+        || doc
+            .get("tool")
+            .and_then(|t| t.get("uv"))
+            .and_then(|u| u.get("dev-dependencies"))
+            .is_some()
+        || doc.get("dependency-groups").is_some()
+        || doc
+            .get("tool")
+            .and_then(|t| t.get("poetry"))
+            .and_then(|p| p.get("dependencies"))
+            .is_some()
+        || doc
+            .get("tool")
+            .and_then(|t| t.get("poetry"))
+            .and_then(|p| p.get("dev-dependencies"))
+            .is_some()
+        || doc
+            .get("tool")
+            .and_then(|t| t.get("poetry"))
+            .and_then(|p| p.get("group"))
+            .is_some()
+}
+
+fn version_with_preserved_prefix(current: &str, latest: &str, preserve: bool) -> String {
+    if preserve {
+        let prefix: String = current
+            .chars()
+            .take_while(|c| !c.is_ascii_digit())
+            .collect();
+        format!("{prefix}{latest}")
+    } else {
+        latest.to_string()
+    }
+}
+
 fn extract_deps_from_array(arr: &[toml::Value], dep_type: DepType) -> Vec<Dependency> {
     arr.iter()
         .filter_map(|v| {
@@ -78,6 +121,45 @@ fn extract_deps_from_array(arr: &[toml::Value], dep_type: DepType) -> Vec<Depend
             let (name, version) = parse_pep508(s)?;
             Some(Dependency::new(name, version, dep_type.clone()))
         })
+        .collect()
+}
+
+fn extract_poetry_dependency(
+    name: &str,
+    value: &toml::Value,
+    default_type: DepType,
+) -> Option<Dependency> {
+    if name == "python" {
+        return None;
+    }
+
+    match value {
+        toml::Value::String(version) => Some(Dependency::new(
+            name.to_string(),
+            version.clone(),
+            default_type,
+        )),
+        toml::Value::Table(table) => {
+            let version = table.get("version")?.as_str()?.to_string();
+            let dep_type = if table
+                .get("optional")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                DepType::Optional
+            } else {
+                default_type
+            };
+            Some(Dependency::new(name.to_string(), version, dep_type))
+        }
+        _ => None,
+    }
+}
+
+fn extract_poetry_deps(table: &toml::value::Table, dep_type: DepType) -> Vec<Dependency> {
+    table
+        .iter()
+        .filter_map(|(name, value)| extract_poetry_dependency(name, value, dep_type.clone()))
         .collect()
 }
 
@@ -106,19 +188,7 @@ impl Plugin for PyprojectPlugin {
         if let Ok(content) = std::fs::read_to_string(&path)
             && let Ok(doc) = content.parse::<toml::Value>()
         {
-            return doc
-                .get("project")
-                .and_then(|p| p.get("dependencies"))
-                .is_some()
-                || doc
-                    .get("project")
-                    .and_then(|p| p.get("optional-dependencies"))
-                    .is_some()
-                || doc
-                    .get("tool")
-                    .and_then(|t| t.get("uv"))
-                    .and_then(|u| u.get("dev-dependencies"))
-                    .is_some();
+            return has_supported_pyproject_dependencies(&doc);
         }
         false
     }
@@ -169,6 +239,45 @@ impl Plugin for PyprojectPlugin {
                         DepType::Optional
                     };
                     deps.extend(extract_deps_from_array(arr, dep_type));
+                }
+            }
+        }
+
+        // [tool.poetry.dependencies]
+        if let Some(table) = doc
+            .get("tool")
+            .and_then(|t| t.get("poetry"))
+            .and_then(|p| p.get("dependencies"))
+            .and_then(|d| d.as_table())
+        {
+            deps.extend(extract_poetry_deps(table, DepType::Normal));
+        }
+
+        // [tool.poetry.dev-dependencies] (legacy Poetry)
+        if let Some(table) = doc
+            .get("tool")
+            .and_then(|t| t.get("poetry"))
+            .and_then(|p| p.get("dev-dependencies"))
+            .and_then(|d| d.as_table())
+        {
+            deps.extend(extract_poetry_deps(table, DepType::Dev));
+        }
+
+        // [tool.poetry.group.<name>.dependencies]
+        if let Some(groups) = doc
+            .get("tool")
+            .and_then(|t| t.get("poetry"))
+            .and_then(|p| p.get("group"))
+            .and_then(|g| g.as_table())
+        {
+            for (group, entry) in groups {
+                if let Some(table) = entry.get("dependencies").and_then(|d| d.as_table()) {
+                    let dep_type = if group == "dev" {
+                        DepType::Dev
+                    } else {
+                        DepType::Optional
+                    };
+                    deps.extend(extract_poetry_deps(table, dep_type));
                 }
             }
         }
@@ -243,7 +352,6 @@ impl Plugin for PyprojectPlugin {
                     let Some(ref latest) = dep.latest_version else {
                         continue;
                     };
-                    // Preserve or strip the operator prefix
                     let new_spec = if preserve {
                         let old = s.to_string();
                         let op_end = old.find(|c: char| c.is_ascii_digit()).unwrap_or(old.len());
@@ -254,6 +362,42 @@ impl Plugin for PyprojectPlugin {
                     };
                     *item = toml_edit::Value::String(toml_edit::Formatted::new(new_spec));
                 }
+            }
+        }
+
+        fn update_poetry_table(
+            table: &mut toml_edit::Table,
+            updates: &[Dependency],
+            preserve: bool,
+        ) {
+            for (name, item) in table.iter_mut() {
+                if name.get() == "python" {
+                    continue;
+                }
+                let Some(dep) = updates.iter().find(|d| d.name == name.get()) else {
+                    continue;
+                };
+                let Some(latest) = dep.latest_version.as_deref() else {
+                    continue;
+                };
+
+                if let Some(current) = item.as_str() {
+                    let new_version = version_with_preserved_prefix(current, latest, preserve);
+                    *item = toml_edit::value(new_version);
+                    continue;
+                }
+
+                let Some(value) = item.as_value_mut() else {
+                    continue;
+                };
+                let Some(inline) = value.as_inline_table_mut() else {
+                    continue;
+                };
+                let Some(current) = inline.get("version").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                let new_version = version_with_preserved_prefix(current, latest, preserve);
+                inline.insert("version", toml_edit::Value::from(new_version));
             }
         }
 
@@ -301,6 +445,41 @@ impl Plugin for PyprojectPlugin {
             }
         }
 
+        // [tool.poetry.dependencies]
+        if let Some(table) = doc
+            .get_mut("tool")
+            .and_then(|t| t.get_mut("poetry"))
+            .and_then(|p| p.get_mut("dependencies"))
+            .and_then(|d| d.as_table_mut())
+        {
+            update_poetry_table(table, &to_update, preserve_range);
+        }
+
+        // [tool.poetry.dev-dependencies]
+        if let Some(table) = doc
+            .get_mut("tool")
+            .and_then(|t| t.get_mut("poetry"))
+            .and_then(|p| p.get_mut("dev-dependencies"))
+            .and_then(|d| d.as_table_mut())
+        {
+            update_poetry_table(table, &to_update, preserve_range);
+        }
+
+        // [tool.poetry.group.<name>.dependencies]
+        if let Some(groups) = doc
+            .get_mut("tool")
+            .and_then(|t| t.get_mut("poetry"))
+            .and_then(|p| p.get_mut("group"))
+            .and_then(|g| g.as_table_mut())
+        {
+            for (_group, entry) in groups.iter_mut() {
+                if let Some(table) = entry.get_mut("dependencies").and_then(|d| d.as_table_mut())
+                {
+                    update_poetry_table(table, &to_update, preserve_range);
+                }
+            }
+        }
+
         std::fs::write(&path, doc.to_string())?;
         Ok(())
     }
@@ -308,7 +487,10 @@ impl Plugin for PyprojectPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pep508;
+    use super::{
+        DepType, extract_poetry_deps, has_supported_pyproject_dependencies, parse_pep508,
+        version_with_preserved_prefix,
+    };
 
     #[test]
     fn parse_pep508_with_version_specifier() {
@@ -330,5 +512,69 @@ mod tests {
             .expect("failed to parse");
         assert_eq!(parsed.0, "uvicorn");
         assert_eq!(parsed.1, ">=0.34");
+    }
+
+    #[test]
+    fn poetry_dependencies_are_extracted_and_python_is_skipped() {
+        let doc: toml::Value = toml::from_str(
+            r#"
+[tool.poetry.dependencies]
+python = "^3.12"
+requests = "^2.32"
+httpx = { version = "^0.28", optional = true }
+"#,
+        )
+        .expect("failed to parse toml");
+
+        let table = doc
+            .get("tool")
+            .and_then(|t| t.get("poetry"))
+            .and_then(|p| p.get("dependencies"))
+            .and_then(|d| d.as_table())
+            .expect("missing poetry dependencies");
+
+        let deps = extract_poetry_deps(table, DepType::Normal);
+        assert_eq!(deps.len(), 2);
+
+        let requests = deps
+            .iter()
+            .find(|dep| dep.name == "requests")
+            .expect("missing requests dependency");
+        assert_eq!(requests.current_version, "^2.32");
+        assert_eq!(requests.dep_type, DepType::Normal);
+
+        let httpx = deps
+            .iter()
+            .find(|dep| dep.name == "httpx")
+            .expect("missing httpx dependency");
+        assert_eq!(httpx.current_version, "^0.28");
+        assert_eq!(httpx.dep_type, DepType::Optional);
+    }
+
+    #[test]
+    fn detect_recognizes_poetry_and_dependency_groups() {
+        let poetry_doc: toml::Value = toml::from_str(
+            r#"
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+"#,
+        )
+        .expect("failed to parse poetry toml");
+        assert!(has_supported_pyproject_dependencies(&poetry_doc));
+
+        let groups_doc: toml::Value = toml::from_str(
+            r#"
+[dependency-groups]
+lint = ["ruff>=0.11"]
+"#,
+        )
+        .expect("failed to parse dependency groups toml");
+        assert!(has_supported_pyproject_dependencies(&groups_doc));
+    }
+
+    #[test]
+    fn version_prefix_preservation_matches_existing_behavior() {
+        assert_eq!(version_with_preserved_prefix("^2.0", "3.1.4", true), "^3.1.4");
+        assert_eq!(version_with_preserved_prefix("^2.0", "3.1.4", false), "3.1.4");
     }
 }
