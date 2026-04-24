@@ -61,6 +61,8 @@ pub struct Dependency {
     pub peer_deps: Vec<(String, String)>,
     /// Peer dependency conflicts: other packages that constrain this one.
     pub held_back_by: Vec<PeerConflict>,
+    /// True when registry/API lookup failed for this dependency.
+    pub check_failed: bool,
 }
 
 impl Dependency {
@@ -73,6 +75,7 @@ impl Dependency {
             satisfied: false,
             peer_deps: Vec::new(),
             held_back_by: Vec::new(),
+            check_failed: false,
         }
     }
 

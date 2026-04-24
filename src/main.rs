@@ -1,9 +1,11 @@
 mod cli;
 mod config;
+mod http;
 mod plugin;
 mod plugins;
+mod progress;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
@@ -26,7 +28,7 @@ fn all_plugins() -> Vec<Box<dyn Plugin>> {
     ]
 }
 
-fn detect_plugins(dir: &PathBuf, only: &Option<Vec<String>>) -> Vec<Box<dyn Plugin>> {
+fn detect_plugins(dir: &Path, only: &Option<Vec<String>>) -> Vec<Box<dyn Plugin>> {
     all_plugins()
         .into_iter()
         .filter(|p| p.detect(dir))
@@ -71,7 +73,12 @@ fn print_dep_table(deps: &[Dependency]) {
     );
 
     // Group by dep type for clearer display
-    let groups: &[DepType] = &[DepType::Normal, DepType::Dev, DepType::Build, DepType::Optional];
+    let groups: &[DepType] = &[
+        DepType::Normal,
+        DepType::Dev,
+        DepType::Build,
+        DepType::Optional,
+    ];
 
     // Calculate column widths across all groups
     let max_name = updatable.iter().map(|d| d.name.len()).max().unwrap_or(10);
@@ -112,10 +119,7 @@ fn print_dep_table(deps: &[Dependency]) {
                     format!("⚠ held back by {}", blockers.join(", ")).yellow()
                 )
             } else if let Some(blocked) = holding_back.get(dep.name.as_str()) {
-                format!(
-                    "  {}",
-                    format!("⚑ blocks {}", blocked.join(", ")).dimmed()
-                )
+                format!("  {}", format!("⚑ blocks {}", blocked.join(", ")).dimmed())
             } else {
                 String::new()
             };
@@ -162,28 +166,50 @@ fn print_dep_table(deps: &[Dependency]) {
     println!();
 }
 
-async fn cmd_check(dir: &PathBuf, only: &Option<Vec<String>>, filter: &Option<Vec<String>>, config: &config::Config) -> Result<()> {
+async fn cmd_check(
+    dir: &Path,
+    only: &Option<Vec<String>>,
+    filter: &Option<Vec<String>>,
+    config: &config::Config,
+) -> Result<()> {
     let plugins = detect_plugins(dir, only);
     if plugins.is_empty() {
-        println!("{}", "No supported dependency files detected in the current directory.".yellow());
+        println!(
+            "{}",
+            "No supported dependency files detected in the current directory.".yellow()
+        );
         return Ok(());
     }
 
     for plugin in &plugins {
         println!("{}", format!("── {} ──", plugin.display_name(dir)).bold());
         let mut deps = plugin.check_updates(dir, config).await?;
+        let total_checked = deps.len();
+        let failed_checks = deps.iter().filter(|d| d.check_failed).count();
         if let Some(names) = filter {
             deps.retain(|d| names.iter().any(|n| d.name.contains(n.as_str())));
         }
         print_dep_table(&deps);
+        if failed_checks > 0 {
+            println!(
+                "  {} Checked {}/{} dependencies successfully ({} failed lookups).\n",
+                "⚠".yellow(),
+                total_checked - failed_checks,
+                total_checked,
+                failed_checks,
+            );
+        }
     }
     Ok(())
 }
 
-async fn cmd_list(dir: &PathBuf, only: &Option<Vec<String>>) -> Result<()> {
+async fn cmd_list(dir: &Path, only: &Option<Vec<String>>) -> Result<()> {
     let plugins = detect_plugins(dir, only);
     if plugins.is_empty() {
-        println!("{}", "No supported dependency files detected in the current directory.".yellow());
+        println!(
+            "{}",
+            "No supported dependency files detected in the current directory.".yellow()
+        );
         return Ok(());
     }
 
@@ -195,7 +221,12 @@ async fn cmd_list(dir: &PathBuf, only: &Option<Vec<String>>) -> Result<()> {
             continue;
         }
         let max_name = deps.iter().map(|d| d.name.len()).max().unwrap_or(10);
-        let groups: &[DepType] = &[DepType::Normal, DepType::Dev, DepType::Build, DepType::Optional];
+        let groups: &[DepType] = &[
+            DepType::Normal,
+            DepType::Dev,
+            DepType::Build,
+            DepType::Optional,
+        ];
         for group in groups {
             let group_deps: Vec<_> = deps.iter().filter(|d| d.dep_type == *group).collect();
             if group_deps.is_empty() {
@@ -217,7 +248,7 @@ async fn cmd_list(dir: &PathBuf, only: &Option<Vec<String>>) -> Result<()> {
 }
 
 async fn cmd_update(
-    dir: &PathBuf,
+    dir: &Path,
     only: &Option<Vec<String>>,
     filter: &Option<Vec<String>>,
     update_all: bool,
@@ -225,7 +256,10 @@ async fn cmd_update(
 ) -> Result<()> {
     let plugins = detect_plugins(dir, only);
     if plugins.is_empty() {
-        println!("{}", "No supported dependency files detected in the current directory.".yellow());
+        println!(
+            "{}",
+            "No supported dependency files detected in the current directory.".yellow()
+        );
         return Ok(());
     }
 
@@ -233,8 +267,20 @@ async fn cmd_update(
         println!("{}", format!("── {} ──", plugin.display_name(dir)).bold());
 
         let mut deps = plugin.check_updates(dir, config).await?;
+        let total_checked = deps.len();
+        let failed_checks = deps.iter().filter(|d| d.check_failed).count();
         if let Some(names) = filter {
             deps.retain(|d| names.iter().any(|n| d.name.contains(n.as_str())));
+        }
+
+        if failed_checks > 0 {
+            println!(
+                "  {} Checked {}/{} dependencies successfully ({} failed lookups).",
+                "⚠".yellow(),
+                total_checked - failed_checks,
+                total_checked,
+                failed_checks,
+            );
         }
 
         let updatable: Vec<_> = deps.iter().filter(|d| d.has_update()).collect();
@@ -250,10 +296,7 @@ async fn cmd_update(
                 .iter()
                 .map(|d| {
                     let latest = d.latest_version.as_deref().unwrap_or("?");
-                    format!(
-                        "{} {} → {}",
-                        d.name, d.current_version, latest
-                    )
+                    format!("{} {} → {}", d.name, d.current_version, latest)
                 })
                 .collect();
 
@@ -295,16 +338,8 @@ async fn main() -> Result<()> {
     let cfg = config::load(&dir);
 
     match cli.command {
-        None | Some(Commands::Check { .. }) => {
-            let (only, filter) = match cli.command {
-                Some(Commands::Check { only, filter }) => (only, filter),
-                _ => (cli.only, cli.filter),
-            };
-            cmd_check(&dir, &only, &filter, &cfg).await
-        }
-        Some(Commands::List { only }) => cmd_list(&dir, &only).await,
-        Some(Commands::Update { only, filter, all }) => {
-            cmd_update(&dir, &only, &filter, all, &cfg).await
-        }
+        None | Some(Commands::Check) => cmd_check(&dir, &cli.only, &cli.filter, &cfg).await,
+        Some(Commands::List) => cmd_list(&dir, &cli.only).await,
+        Some(Commands::Update { all }) => cmd_update(&dir, &cli.only, &cli.filter, all, &cfg).await,
     }
 }

@@ -6,10 +6,11 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 use crate::config::Config;
+use crate::http;
 use crate::plugin::{DepType, Dependency, PeerConflict, Plugin};
+use crate::progress;
 
 use futures::stream::{self, StreamExt};
-use indicatif::{ProgressBar, ProgressStyle};
 
 /// Detected JS package manager based on lock file presence.
 #[derive(Debug, Clone, Copy)]
@@ -60,10 +61,7 @@ pub struct NpmPlugin {
 impl NpmPlugin {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .user_agent("ruckup/0.1.0")
-                .build()
-                .expect("failed to build HTTP client"),
+            client: http::default_client().expect("failed to build HTTP client"),
         }
     }
 
@@ -115,21 +113,26 @@ fn extract_deps(obj: &JsonValue, dep_type: DepType) -> Vec<Dependency> {
     map.iter()
         .filter_map(|(name, value)| {
             let version_str = value.as_str()?;
-            Some(Dependency::new(name.clone(), version_str.to_string(), dep_type.clone()))
+            Some(Dependency::new(
+                name.clone(),
+                version_str.to_string(),
+                dep_type.clone(),
+            ))
         })
         .collect()
 }
 
-async fn fetch_latest(client: &reqwest::Client, name: &str) -> Result<(String, Vec<(String, String)>)> {
+async fn fetch_latest(
+    client: &reqwest::Client,
+    name: &str,
+) -> Result<(String, Vec<(String, String)>)> {
     let url = format!("https://registry.npmjs.org/{name}");
-    let resp: NpmRegistryResponse = client
-        .get(&url)
-        .header("Accept", "application/vnd.npm.install-v1+json")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let resp: NpmRegistryResponse = http::get_json_with_retries(|| {
+        client
+            .get(&url)
+            .header("Accept", "application/vnd.npm.install-v1+json")
+    })
+    .await?;
     let latest = &resp.dist_tags.latest;
     let peer_deps = resp.versions.get(latest).map_or_else(Vec::new, |meta| {
         meta.peer_dependencies
@@ -195,14 +198,7 @@ impl Plugin for NpmPlugin {
         let client = &self.client;
         let concurrency = config.npm_concurrency;
 
-        let pb = ProgressBar::new(deps.len() as u64);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "  {bar:30.cyan/dim} {pos}/{len} checked",
-            )
-            .unwrap()
-            .progress_chars("━╸─"),
-        );
+        let pb = progress::check_progress_bar(deps.len() as u64);
 
         let mut results: Vec<Dependency> = stream::iter(deps)
             .map(|dep| async move {
@@ -220,7 +216,10 @@ impl Plugin for NpmPlugin {
                         dep.peer_deps = peer_deps;
                         dep.latest_version = Some(latest);
                     }
-                    Err(e) => eprintln!("  warning: failed to check {}: {e}", dep.name),
+                    Err(e) => {
+                        dep.check_failed = true;
+                        eprintln!("  warning: failed to check {}: {e}", dep.name)
+                    }
                 }
                 dep
             })
@@ -240,7 +239,7 @@ impl Plugin for NpmPlugin {
 
         let mut conflicts: Vec<(usize, PeerConflict)> = Vec::new();
 
-        for (_i, dep) in results.iter().enumerate() {
+        for dep in &results {
             let blocker_version = dep
                 .latest_version
                 .as_deref()
@@ -306,21 +305,18 @@ impl Plugin for NpmPlugin {
                 DepType::Optional => "optionalDependencies",
                 DepType::Build => continue,
             };
-            if let Some(obj) = doc.get_mut(section).and_then(|v| v.as_object_mut()) {
-                if let Some(entry) = obj.get_mut(&dep.name) {
-                    let new_value = if config.preserve_range {
-                        // Preserve the range prefix (^, ~, >=, etc.)
-                        let old = entry.as_str().unwrap_or("");
-                        let prefix: String = old
-                            .chars()
-                            .take_while(|c| !c.is_ascii_digit())
-                            .collect();
-                        format!("{prefix}{latest}")
-                    } else {
-                        latest.clone()
-                    };
-                    *entry = JsonValue::String(new_value);
-                }
+            if let Some(obj) = doc.get_mut(section).and_then(|v| v.as_object_mut())
+                && let Some(entry) = obj.get_mut(&dep.name)
+            {
+                let new_value = if config.preserve_range {
+                    // Preserve the range prefix (^, ~, >=, etc.)
+                    let old = entry.as_str().unwrap_or("");
+                    let prefix: String = old.chars().take_while(|c| !c.is_ascii_digit()).collect();
+                    format!("{prefix}{latest}")
+                } else {
+                    latest.clone()
+                };
+                *entry = JsonValue::String(new_value);
             }
         }
 

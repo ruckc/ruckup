@@ -6,11 +6,12 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 
 use crate::config::Config;
+use crate::http;
 use crate::plugin::{DepType, Dependency, Plugin};
+use crate::progress;
 
 fn replacement_ref(current: &str, latest: &str) -> Option<String> {
     if current == latest {
@@ -35,20 +36,8 @@ pub struct GithubActionsPlugin {
 
 impl GithubActionsPlugin {
     pub fn new() -> Self {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-            let value = format!("Bearer {token}")
-                .parse()
-                .expect("invalid GITHUB_TOKEN header value");
-            headers.insert(reqwest::header::AUTHORIZATION, value);
-        }
-
         Self {
-            client: reqwest::Client::builder()
-                .user_agent("ruckup/0.1.0")
-                .default_headers(headers)
-                .build()
-                .expect("failed to build HTTP client"),
+            client: http::github_client().expect("failed to build HTTP client"),
         }
     }
 }
@@ -199,7 +188,13 @@ async fn fetch_latest(client: &reqwest::Client, repo: &str) -> Result<String> {
 fn fetch_latest_git_tag(repo: &str) -> Result<String> {
     let remote = format!("https://github.com/{repo}");
     let output = Command::new("git")
-        .args(["ls-remote", "--tags", "--refs", "--sort=-version:refname", &remote])
+        .args([
+            "ls-remote",
+            "--tags",
+            "--refs",
+            "--sort=-version:refname",
+            &remote,
+        ])
         .output()
         .with_context(|| format!("failed to run git ls-remote for {repo}"))?;
 
@@ -306,10 +301,10 @@ impl Plugin for GithubActionsPlugin {
                 .with_context(|| format!("failed to read {}", file.display()))?;
 
             for line in content.lines() {
-                if let Some((name, version)) = parse_uses_value(line) {
-                    if seen.insert((name.clone(), version.clone())) {
-                        deps.push(Dependency::new(name, version, DepType::Build));
-                    }
+                if let Some((name, version)) = parse_uses_value(line)
+                    && seen.insert((name.clone(), version.clone()))
+                {
+                    deps.push(Dependency::new(name, version, DepType::Build));
                 }
             }
         }
@@ -317,16 +312,12 @@ impl Plugin for GithubActionsPlugin {
         Ok(deps)
     }
 
-    async fn check_updates(&self, dir: &Path, _config: &Config) -> Result<Vec<Dependency>> {
+    async fn check_updates(&self, dir: &Path, config: &Config) -> Result<Vec<Dependency>> {
         let deps = self.list_dependencies(dir).await?;
         let client = &self.client;
+        let concurrency = config.github_actions_concurrency;
 
-        let pb = ProgressBar::new(deps.len() as u64);
-        pb.set_style(
-            ProgressStyle::with_template("  {bar:30.cyan/dim} {pos}/{len} checked")
-                .unwrap()
-                .progress_chars("━╸─"),
-        );
+        let pb = progress::check_progress_bar(deps.len() as u64);
 
         let results: Vec<Dependency> = stream::iter(deps)
             .map(|dep| async move {
@@ -337,13 +328,19 @@ impl Plugin for GithubActionsPlugin {
                             dep.satisfied = action_ref_matches(&dep.current_version, &latest);
                             dep.latest_version = Some(latest);
                         }
-                        Err(err) => eprintln!("  warning: failed to check {}: {err}", dep.name),
+                        Err(err) => {
+                            dep.check_failed = true;
+                            eprintln!("  warning: failed to check {}: {err}", dep.name)
+                        }
                     },
-                    None => eprintln!("  warning: unsupported action reference {}", dep.name),
+                    None => {
+                        dep.check_failed = true;
+                        eprintln!("  warning: unsupported action reference {}", dep.name)
+                    }
                 }
                 dep
             })
-            .buffer_unordered(8)
+            .buffer_unordered(concurrency)
             .inspect(|_| pb.inc(1))
             .collect()
             .await;
@@ -352,11 +349,7 @@ impl Plugin for GithubActionsPlugin {
         Ok(results)
     }
 
-    async fn update(&self, _dir: &Path, _deps: &[String], _config: &Config) -> Result<()> {
-        let dir = _dir;
-        let dep_names = _deps;
-        let config = _config;
-
+    async fn update(&self, dir: &Path, dep_names: &[String], config: &Config) -> Result<()> {
         let updates = self.check_updates(dir, config).await?;
         let to_update: std::collections::HashMap<String, String> = updates
             .into_iter()
@@ -398,5 +391,29 @@ impl Plugin for GithubActionsPlugin {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{action_ref_matches, parse_uses_value};
+
+    #[test]
+    fn parse_uses_value_extracts_repo_and_ref() {
+        let parsed = parse_uses_value("uses: actions/checkout@v4").expect("expected parsed uses");
+        assert_eq!(parsed.0, "actions/checkout");
+        assert_eq!(parsed.1, "v4");
+    }
+
+    #[test]
+    fn parse_uses_value_ignores_local_actions() {
+        assert!(parse_uses_value("uses: ./action").is_none());
+        assert!(parse_uses_value("uses: docker://alpine:3.20").is_none());
+    }
+
+    #[test]
+    fn action_ref_matches_major_prefix() {
+        assert!(action_ref_matches("v4", "v4.1.0"));
+        assert!(!action_ref_matches("v3", "v4.1.0"));
     }
 }

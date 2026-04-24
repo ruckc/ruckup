@@ -28,6 +28,10 @@ pub struct Config {
     /// Max concurrent registry lookups for PyPI.
     /// Default: 10
     pub pypi_concurrency: usize,
+
+    /// Max concurrent registry lookups for GitHub Actions metadata.
+    /// Default: 8
+    pub github_actions_concurrency: usize,
 }
 
 impl Default for Config {
@@ -37,6 +41,7 @@ impl Default for Config {
             cargo_concurrency: 5,
             npm_concurrency: 16,
             pypi_concurrency: 10,
+            github_actions_concurrency: 8,
         }
     }
 }
@@ -50,6 +55,7 @@ struct RcFile {
     cargo_concurrency: Option<usize>,
     npm_concurrency: Option<usize>,
     pypi_concurrency: Option<usize>,
+    github_actions_concurrency: Option<usize>,
 }
 
 impl RcFile {
@@ -62,10 +68,7 @@ impl RcFile {
         if let Ok(rc) = toml::from_str::<RcFile>(&content) {
             return Some(rc);
         }
-        eprintln!(
-            "  warning: failed to parse config file {}",
-            path.display()
-        );
+        eprintln!("  warning: failed to parse config file {}", path.display());
         None
     }
 
@@ -82,6 +85,9 @@ impl RcFile {
         }
         if let Some(v) = self.pypi_concurrency {
             config.pypi_concurrency = v.max(1);
+        }
+        if let Some(v) = self.github_actions_concurrency {
+            config.github_actions_concurrency = v.max(1);
         }
     }
 }
@@ -102,6 +108,9 @@ impl EnvLayer {
         }
         if let Some(v) = Self::read_usize("RUCKUP_PYPI_CONCURRENCY") {
             config.pypi_concurrency = v;
+        }
+        if let Some(v) = Self::read_usize("RUCKUP_GITHUB_ACTIONS_CONCURRENCY") {
+            config.github_actions_concurrency = v;
         }
     }
 
@@ -144,10 +153,10 @@ pub fn load(dir: &Path) -> Config {
     let mut config = Config::default();
 
     // Global rc
-    if let Some(path) = global_rc_path() {
-        if let Some(rc) = RcFile::load(&path) {
-            rc.apply_to(&mut config);
-        }
+    if let Some(path) = global_rc_path()
+        && let Some(rc) = RcFile::load(&path)
+    {
+        rc.apply_to(&mut config);
     }
 
     // Project-local rc
@@ -169,6 +178,7 @@ mod tests {
     fn default_preserves_range() {
         let config = Config::default();
         assert!(config.preserve_range);
+        assert_eq!(config.github_actions_concurrency, 8);
     }
 
     #[test]
@@ -192,5 +202,15 @@ mod tests {
         let mut config = Config::default();
         rc.apply_to(&mut config);
         assert!(config.preserve_range); // stays default
+        assert_eq!(config.github_actions_concurrency, 8);
+    }
+
+    #[test]
+    fn rc_file_applies_github_actions_concurrency() {
+        let content = r#"github_actions_concurrency = 3"#;
+        let rc: RcFile = toml::from_str(content).unwrap();
+        let mut config = Config::default();
+        rc.apply_to(&mut config);
+        assert_eq!(config.github_actions_concurrency, 3);
     }
 }

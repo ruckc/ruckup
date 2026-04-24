@@ -160,6 +160,7 @@ Both TOML and JSON are supported for `.ruckuprc`.
 - `cargo_concurrency`
 - `npm_concurrency`
 - `pypi_concurrency`
+- `github_actions_concurrency`
 
 ### Example `.ruckuprc`
 
@@ -168,6 +169,7 @@ preserve_range = true
 cargo_concurrency = 5
 npm_concurrency = 16
 pypi_concurrency = 10
+github_actions_concurrency = 8
 ```
 
 ### Environment variables
@@ -176,12 +178,14 @@ pypi_concurrency = 10
 - `RUCKUP_CARGO_CONCURRENCY`
 - `RUCKUP_NPM_CONCURRENCY`
 - `RUCKUP_PYPI_CONCURRENCY`
+- `RUCKUP_GITHUB_ACTIONS_CONCURRENCY`
 
 Examples:
 
 ```bash
 RUCKUP_PRESERVE_RANGE=false ruckup update --all
 RUCKUP_NPM_CONCURRENCY=8 ruckup check --only npm
+RUCKUP_GITHUB_ACTIONS_CONCURRENCY=4 ruckup check --only github-actions
 ```
 
 ## Notes

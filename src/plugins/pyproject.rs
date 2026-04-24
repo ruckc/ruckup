@@ -7,10 +7,11 @@ use serde::Deserialize;
 use toml_edit::DocumentMut;
 
 use crate::config::Config;
+use crate::http;
 use crate::plugin::{DepType, Dependency, Plugin};
+use crate::progress;
 
 use futures::stream::{self, StreamExt};
-use indicatif::{ProgressBar, ProgressStyle};
 
 pub struct PyprojectPlugin {
     client: reqwest::Client,
@@ -19,10 +20,7 @@ pub struct PyprojectPlugin {
 impl PyprojectPlugin {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .user_agent("ruckup/0.1.0")
-                .build()
-                .expect("failed to build HTTP client"),
+            client: http::default_client().expect("failed to build HTTP client"),
         }
     }
 }
@@ -43,7 +41,7 @@ fn parse_pep508(spec: &str) -> Option<(String, String)> {
     let spec = spec.split(';').next().unwrap_or(spec).trim();
 
     // Find where the version specifier starts
-    let version_start = spec.find(|c: char| matches!(c, '>' | '<' | '=' | '!' | '~'));
+    let version_start = spec.find(['>', '<', '=', '!', '~']);
 
     match version_start {
         Some(pos) => {
@@ -85,13 +83,7 @@ fn extract_deps_from_array(arr: &[toml::Value], dep_type: DepType) -> Vec<Depend
 
 async fn fetch_latest(client: &reqwest::Client, name: &str) -> Result<String> {
     let url = format!("https://pypi.org/pypi/{name}/json");
-    let resp: PypiResponse = client
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let resp: PypiResponse = http::get_json_with_retries(|| client.get(&url)).await?;
     Ok(resp.info.version)
 }
 
@@ -111,22 +103,22 @@ impl Plugin for PyprojectPlugin {
             return false;
         }
         // Only activate if there are Python dependencies (not just a Cargo workspace pyproject)
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(doc) = content.parse::<toml::Value>() {
-                return doc
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(doc) = content.parse::<toml::Value>()
+        {
+            return doc
+                .get("project")
+                .and_then(|p| p.get("dependencies"))
+                .is_some()
+                || doc
                     .get("project")
-                    .and_then(|p| p.get("dependencies"))
+                    .and_then(|p| p.get("optional-dependencies"))
                     .is_some()
-                    || doc
-                        .get("project")
-                        .and_then(|p| p.get("optional-dependencies"))
-                        .is_some()
-                    || doc
-                        .get("tool")
-                        .and_then(|t| t.get("uv"))
-                        .and_then(|u| u.get("dev-dependencies"))
-                        .is_some();
-            }
+                || doc
+                    .get("tool")
+                    .and_then(|t| t.get("uv"))
+                    .and_then(|u| u.get("dev-dependencies"))
+                    .is_some();
         }
         false
     }
@@ -189,14 +181,7 @@ impl Plugin for PyprojectPlugin {
         let client = &self.client;
         let concurrency = config.pypi_concurrency;
 
-        let pb = ProgressBar::new(deps.len() as u64);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "  {bar:30.cyan/dim} {pos}/{len} checked",
-            )
-            .unwrap()
-            .progress_chars("━╸─"),
-        );
+        let pb = progress::check_progress_bar(deps.len() as u64);
 
         let results: Vec<Dependency> = stream::iter(deps)
             .map(|dep| async move {
@@ -207,7 +192,9 @@ impl Plugin for PyprojectPlugin {
                             Ok(ver) => {
                                 match pep440_rs::VersionSpecifiers::from_str(&dep.current_version) {
                                     Ok(specs) => specs.contains(&ver),
-                                    Err(_) => dep.current_version == "*" || latest == dep.current_version,
+                                    Err(_) => {
+                                        dep.current_version == "*" || latest == dep.current_version
+                                    }
                                 }
                             }
                             Err(_) => latest == dep.current_version,
@@ -215,7 +202,10 @@ impl Plugin for PyprojectPlugin {
                         dep.satisfied = satisfied;
                         dep.latest_version = Some(latest);
                     }
-                    Err(e) => eprintln!("  warning: failed to check {}: {e}", dep.name),
+                    Err(e) => {
+                        dep.check_failed = true;
+                        eprintln!("  warning: failed to check {}: {e}", dep.name)
+                    }
                 }
                 dep
             })
@@ -256,9 +246,7 @@ impl Plugin for PyprojectPlugin {
                     // Preserve or strip the operator prefix
                     let new_spec = if preserve {
                         let old = s.to_string();
-                        let op_end = old
-                            .find(|c: char| c.is_ascii_digit())
-                            .unwrap_or(old.len());
+                        let op_end = old.find(|c: char| c.is_ascii_digit()).unwrap_or(old.len());
                         let prefix = &old[..op_end];
                         format!("{prefix}{latest}")
                     } else {
@@ -302,7 +290,10 @@ impl Plugin for PyprojectPlugin {
         }
 
         // [dependency-groups.*]
-        if let Some(groups) = doc.get_mut("dependency-groups").and_then(|g| g.as_table_mut()) {
+        if let Some(groups) = doc
+            .get_mut("dependency-groups")
+            .and_then(|g| g.as_table_mut())
+        {
             for (_group, arr) in groups.iter_mut() {
                 if let Some(arr) = arr.as_array_mut() {
                     update_array(arr, &to_update, preserve_range);
@@ -312,5 +303,32 @@ impl Plugin for PyprojectPlugin {
 
         std::fs::write(&path, doc.to_string())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pep508;
+
+    #[test]
+    fn parse_pep508_with_version_specifier() {
+        let parsed = parse_pep508("requests>=2.28.0").expect("failed to parse");
+        assert_eq!(parsed.0, "requests");
+        assert_eq!(parsed.1, ">=2.28.0");
+    }
+
+    #[test]
+    fn parse_pep508_without_version_defaults_to_wildcard() {
+        let parsed = parse_pep508("rich").expect("failed to parse");
+        assert_eq!(parsed.0, "rich");
+        assert_eq!(parsed.1, "*");
+    }
+
+    #[test]
+    fn parse_pep508_strips_extras_and_markers() {
+        let parsed = parse_pep508("uvicorn[standard]>=0.34; python_version >= '3.9'")
+            .expect("failed to parse");
+        assert_eq!(parsed.0, "uvicorn");
+        assert_eq!(parsed.1, ">=0.34");
     }
 }
