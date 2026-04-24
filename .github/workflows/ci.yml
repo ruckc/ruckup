@@ -42,7 +42,7 @@ jobs:
         run: cargo install --locked cargo-audit
 
       - name: Security audit
-        run: cargo audit
+        run: cargo audit -D warnings
 
       - name: Build
         run: cargo build --all-targets --locked
