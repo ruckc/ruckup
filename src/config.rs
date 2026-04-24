@@ -32,6 +32,10 @@ pub struct Config {
     /// Max concurrent registry lookups for GitHub Actions metadata.
     /// Default: 8
     pub github_actions_concurrency: usize,
+
+    /// Max concurrent registry lookups for Docker image tags.
+    /// Default: 8
+    pub docker_concurrency: usize,
 }
 
 impl Default for Config {
@@ -42,6 +46,7 @@ impl Default for Config {
             npm_concurrency: 16,
             pypi_concurrency: 10,
             github_actions_concurrency: 8,
+            docker_concurrency: 8,
         }
     }
 }
@@ -56,6 +61,7 @@ struct RcFile {
     npm_concurrency: Option<usize>,
     pypi_concurrency: Option<usize>,
     github_actions_concurrency: Option<usize>,
+    docker_concurrency: Option<usize>,
 }
 
 impl RcFile {
@@ -89,6 +95,9 @@ impl RcFile {
         if let Some(v) = self.github_actions_concurrency {
             config.github_actions_concurrency = v.max(1);
         }
+        if let Some(v) = self.docker_concurrency {
+            config.docker_concurrency = v.max(1);
+        }
     }
 }
 
@@ -111,6 +120,9 @@ impl EnvLayer {
         }
         if let Some(v) = Self::read_usize("RUCKUP_GITHUB_ACTIONS_CONCURRENCY") {
             config.github_actions_concurrency = v;
+        }
+        if let Some(v) = Self::read_usize("RUCKUP_DOCKER_CONCURRENCY") {
+            config.docker_concurrency = v;
         }
     }
 
@@ -179,6 +191,7 @@ mod tests {
         let config = Config::default();
         assert!(config.preserve_range);
         assert_eq!(config.github_actions_concurrency, 8);
+        assert_eq!(config.docker_concurrency, 8);
     }
 
     #[test]
@@ -212,5 +225,14 @@ mod tests {
         let mut config = Config::default();
         rc.apply_to(&mut config);
         assert_eq!(config.github_actions_concurrency, 3);
+    }
+
+    #[test]
+    fn rc_file_applies_docker_concurrency() {
+        let content = r#"docker_concurrency = 4"#;
+        let rc: RcFile = toml::from_str(content).unwrap();
+        let mut config = Config::default();
+        rc.apply_to(&mut config);
+        assert_eq!(config.docker_concurrency, 4);
     }
 }

@@ -4,12 +4,15 @@
 
 Today it supports:
 - Rust crates in `Cargo.toml`
+- Docker images in `Dockerfile*`
+- Docker images in `docker-compose.yml`
+- Docker images in `compose.yml`
 - GitHub Actions in `.github/workflows/*.yml`
 - JavaScript dependencies in `package.json`
 - Python dependencies in `pyproject.toml`
 - Python dependencies in `requirements.txt`
 
-It is useful for repos that mix Rust, Node, and Python tooling and want one place to:
+It is useful for repos that mix Rust, Node, Python, and container tooling and want one place to:
 - list detected dependencies
 - check for newer versions
 - interactively apply updates
@@ -18,7 +21,7 @@ It is useful for repos that mix Rust, Node, and Python tooling and want one plac
 ## Features
 
 - Auto-detects supported manifest files in the current directory
-- Checks latest versions from crates.io, GitHub Actions, npm, and PyPI
+- Checks latest versions from crates.io, Docker Hub, GitHub Actions, npm, and PyPI
 - Preserves dependency groups such as normal, dev, build, and optional
 - Supports interactive updates with multi-select prompts
 - Understands npm peer dependency constraints and shows when packages are held back
@@ -33,6 +36,19 @@ It is useful for repos that mix Rust, Node, and Python tooling and want one plac
   - `[dependencies]`
   - `[dev-dependencies]`
   - `[build-dependencies]`
+
+### Docker
+- `Dockerfile`
+- `Dockerfile.*`
+- `docker-compose.yml`
+- `docker-compose.yaml`
+- `compose.yml`
+- `compose.yaml`
+- supported references:
+  - `FROM node:20-alpine`
+  - `FROM --platform=$BUILDPLATFORM rust:1.86.0 AS builder`
+  - `image: postgres:16.4`
+- current lookup support targets Docker Hub repositories and semver-like tags
 
 ### GitHub Actions
 - `.github/workflows/*.yml`
@@ -91,7 +107,7 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -o, --only <ONLY>      Only check these specific package managers (cargo, github-actions, npm, pyproject, requirements)
+  -o, --only <ONLY>      Only check these specific package managers (cargo, docker, github-actions, npm, pyproject, requirements)
   -f, --filter <FILTER>  Filter to specific dependency names
   -h, --help             Print help
   -V, --version          Print version
@@ -123,6 +139,12 @@ Check only npm dependencies matching a package name:
 ruckup check --only npm --filter react
 ```
 
+Check only Docker image tags:
+
+```bash
+ruckup check --only docker
+```
+
 List detected dependencies without checking registries:
 
 ```bash
@@ -145,12 +167,12 @@ Check only Python dependencies:
 
 ```bash
 ruckup check --only pyproject
+```
 
 Check only `requirements.txt` dependencies:
 
 ```bash
 ruckup check --only requirements
-```
 ```
 
 Filter multiple ecosystems or names with comma-separated values:
@@ -177,6 +199,7 @@ Both TOML and JSON are supported for `.ruckuprc`.
 - `npm_concurrency`
 - `pypi_concurrency`
 - `github_actions_concurrency`
+- `docker_concurrency`
 
 ### Example `.ruckuprc`
 
@@ -186,6 +209,7 @@ cargo_concurrency = 5
 npm_concurrency = 16
 pypi_concurrency = 10
 github_actions_concurrency = 8
+docker_concurrency = 8
 ```
 
 ### Environment variables
@@ -195,6 +219,7 @@ github_actions_concurrency = 8
 - `RUCKUP_NPM_CONCURRENCY`
 - `RUCKUP_PYPI_CONCURRENCY`
 - `RUCKUP_GITHUB_ACTIONS_CONCURRENCY`
+- `RUCKUP_DOCKER_CONCURRENCY`
 
 Examples:
 
@@ -202,11 +227,13 @@ Examples:
 RUCKUP_PRESERVE_RANGE=false ruckup update --all
 RUCKUP_NPM_CONCURRENCY=8 ruckup check --only npm
 RUCKUP_GITHUB_ACTIONS_CONCURRENCY=4 ruckup check --only github-actions
+RUCKUP_DOCKER_CONCURRENCY=4 ruckup check --only docker
 ```
 
 ## Notes
 
 - `check` is the default command, so `ruckup` and `ruckup check` are equivalent.
+- Docker support currently updates tagged Docker Hub images in `Dockerfile*`, `docker-compose.yml/.yaml`, and `compose.yml/.yaml`; unsupported registries and floating tags are listed but not upgraded.
 - npm results include peer dependency conflict reporting so you can see what is blocking an upgrade.
 - GitHub Actions updates rewrite pinned `uses: owner/repo@ref` workflow references; floating refs like `stable` and `release/v1` are left alone.
 - Python dependency detection only activates for `pyproject.toml` files that actually declare Python dependencies.

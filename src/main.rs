@@ -15,6 +15,7 @@ use dialoguer::MultiSelect;
 use cli::{Cli, Commands};
 use plugin::{Dependency, Plugin};
 use plugins::cargo::CargoPlugin;
+use plugins::docker::DockerPlugin;
 use plugins::github_actions::GithubActionsPlugin;
 use plugins::npm::NpmPlugin;
 use plugins::pyproject::PyprojectPlugin;
@@ -23,6 +24,7 @@ use plugins::requirements::RequirementsPlugin;
 fn all_plugins() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(CargoPlugin::new()),
+        Box::new(DockerPlugin::new()),
         Box::new(GithubActionsPlugin::new()),
         Box::new(NpmPlugin::new()),
         Box::new(PyprojectPlugin::new()),
