@@ -16,11 +16,14 @@ fn list_detects_docker_manifests() {
     .expect("failed to write compose.yml");
 
     let mut cmd = Command::cargo_bin("ruckup").expect("failed to load ruckup binary");
-    cmd.current_dir(temp.path()).args(["list", "--only", "docker"]);
+    cmd.current_dir(temp.path())
+        .args(["list", "--only", "docker"]);
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("docker (Dockerfile.dev, compose.yml)"))
+        .stdout(predicate::str::contains(
+            "docker (Dockerfile.dev, compose.yml)",
+        ))
         .stdout(predicate::str::contains("node"))
         .stdout(predicate::str::contains("postgres"));
 }

@@ -191,7 +191,10 @@ fn parse_line(line: &str, dep_type: DepType) -> Option<ParsedOccurrence> {
 fn docker_hub_repo(name: &str) -> Option<String> {
     let first = name.split('/').next().unwrap_or(name);
     let repo = if first.contains('.') || first.contains(':') || first == "localhost" {
-        if !matches!(first, "docker.io" | "index.docker.io" | "registry-1.docker.io") {
+        if !matches!(
+            first,
+            "docker.io" | "index.docker.io" | "registry-1.docker.io"
+        ) {
             return None;
         }
         name.split_once('/')?.1
@@ -296,7 +299,8 @@ async fn fetch_tags(client: &reqwest::Client, repo: &str) -> Result<Vec<String>>
     let mut pages = 0usize;
 
     while let Some(url) = next.take() {
-        let response: DockerHubTagsResponse = http::get_json_with_retries(|| client.get(&url)).await?;
+        let response: DockerHubTagsResponse =
+            http::get_json_with_retries(|| client.get(&url)).await?;
         tags.extend(response.results.into_iter().map(|tag| tag.name));
         next = response.next;
         pages += 1;
@@ -503,7 +507,10 @@ mod tests {
     #[test]
     fn docker_hub_repo_normalizes_official_images() {
         assert_eq!(docker_hub_repo("python").as_deref(), Some("library/python"));
-        assert_eq!(docker_hub_repo("docker.io/library/python").as_deref(), Some("library/python"));
+        assert_eq!(
+            docker_hub_repo("docker.io/library/python").as_deref(),
+            Some("library/python")
+        );
         assert!(docker_hub_repo("ghcr.io/acme/app").is_none());
     }
 
