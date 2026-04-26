@@ -339,8 +339,6 @@ jobs:
         run: cargo npm generate
 
       - name: Publish npm packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: cargo npm publish -- --provenance --access public
 
       - name: Set up Python
