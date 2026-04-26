@@ -1,205 +1,151 @@
 # ruckup
 
-`ruckup` checks and updates dependencies across multiple package managers from a single CLI.
+> One command to check and update dependencies across **Cargo, Docker, GitHub Actions, npm, and Python** — all at once.
 
-Today it supports:
-- Rust crates in `Cargo.toml`
-- Docker images in `Dockerfile*`
-- Docker images in `docker-compose.yml`
-- Docker images in `compose.yml`
-- GitHub Actions in `.github/workflows/*.yml`
-- JavaScript dependencies in `package.json`
-- Python dependencies in `pyproject.toml`
-- Python dependencies in `requirements.txt`
-
-It is useful for repos that mix Rust, Node, Python, and container tooling and want one place to:
-- list detected dependencies
-- check for newer versions
-- interactively apply updates
-- filter work to a specific ecosystem or package name
-
-## Features
-
-- Auto-detects supported manifest files in the current directory
-- Checks latest versions from crates.io, Docker Hub, GitHub Actions, npm, and PyPI
-- Preserves dependency groups such as normal, dev, build, and optional
-- Supports interactive updates with multi-select prompts
-- Understands npm peer dependency constraints and shows when packages are held back
-- Supports project and global config through `.ruckuprc`
-- Supports env var overrides for concurrency and version-range behavior
-
-## Supported Files
-
-### Cargo
-- `Cargo.toml`
-- dependency sections:
-  - `[dependencies]`
-  - `[dev-dependencies]`
-  - `[build-dependencies]`
-
-### Docker
-- `Dockerfile`
-- `Dockerfile.*`
-- `docker-compose.yml`
-- `docker-compose.yaml`
-- `compose.yml`
-- `compose.yaml`
-- supported references:
-  - `FROM node:20-alpine`
-  - `FROM --platform=$BUILDPLATFORM rust:1.86.0 AS builder`
-  - `image: postgres:16.4`
-- current lookup support targets Docker Hub repositories and semver-like tags
-
-### GitHub Actions
-- `.github/workflows/*.yml`
-- scans `uses: owner/repo@ref` and `uses: owner/repo/path@ref`
-- ignores local actions such as `./action` and `docker://` actions
-
-### npm / pnpm / yarn
-- `package.json`
-- lockfile-aware display when one of these is present:
-  - `package-lock.json`
-  - `pnpm-lock.yaml`
-  - `yarn.lock`
-
-### Python
-- `pyproject.toml`
-- dependency sources:
-  - `[project.dependencies]`
-  - `[project.optional-dependencies]`
-  - `[tool.uv.dev-dependencies]`
-  - `[dependency-groups]`
-  - `[tool.poetry.dependencies]`
-  - `[tool.poetry.dev-dependencies]`
-  - `[tool.poetry.group.<name>.dependencies]`
-- `requirements.txt`
-- supported line forms:
-  - `package==1.2.3`
-  - `package>=1.2`
-  - `package[extra]>=1.2 ; python_version >= '3.10'`
-  - unpinned packages like `package`
+`ruckup` auto-detects your project's manifest files and checks every dependency against its upstream registry. Run it in any repo — even polyglot monorepos — and get a unified view of what's outdated. Then apply updates interactively or all at once.
 
 ## Installation
 
-### From source
+### cargo
 
 ```bash
+cargo install ruckup
+```
+
+### npm / pnpm / yarn / bun
+
+```bash
+npm install -g ruckup
+# or
+pnpm add -g ruckup
+# or
+yarn global add ruckup
+# or
+bun add -g ruckup
+```
+
+### pip / uv / pipx
+
+```bash
+pip install ruckup
+# or
+uv tool install ruckup
+# or
+pipx install ruckup
+```
+
+### Pre-built binaries
+
+Download the latest binary for your platform from the [GitHub Releases page](https://github.com/ruckc/ruckup/releases), extract it, and place it on your `PATH`.
+
+| Platform | Archive |
+|---|---|
+| Linux x86\_64 (glibc) | `ruckup-linux-x64.tar.gz` |
+| Linux x86\_64 (musl) | `ruckup-linux-x64-musl.tar.gz` |
+| Linux arm64 (glibc) | `ruckup-linux-arm64.tar.gz` |
+| Linux arm64 (musl) | `ruckup-linux-arm64-musl.tar.gz` |
+| macOS arm64 (Apple Silicon) | `ruckup-darwin-arm64.tar.gz` |
+| macOS x86\_64 | `ruckup-darwin-x64.tar.gz` |
+| Windows x86\_64 | `ruckup-win32-x64.zip` |
+| Windows arm64 | `ruckup-win32-arm64.zip` |
+
+### Build from source
+
+```bash
+git clone https://github.com/ruckc/ruckup.git
+cd ruckup
 cargo install --path .
 ```
 
-### Local development
+## Features
 
-```bash
-cargo run -- --help
-```
+- **Auto-detection** — scans the current directory for all supported manifest files
+- **Multi-ecosystem** — one tool for Cargo, Docker, GitHub Actions, npm, and Python
+- **Interactive updates** — multi-select prompt lets you pick exactly what to bump
+- **Bulk updates** — `--all` flag skips prompts and applies everything
+- **Flexible filtering** — scope work to a specific ecosystem or package name
+- **Lockfile-aware** — respects npm peer dependency constraints
+- **Configurable** — per-project `.ruckuprc` plus global config and env var overrides
+
+## Supported Manifests
+
+| Ecosystem | Files |
+|---|---|
+| **Cargo** | `Cargo.toml` — `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]` |
+| **Docker** | `Dockerfile`, `Dockerfile.*`, `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`, `compose.yaml` |
+| **GitHub Actions** | `.github/workflows/*.yml` — `uses: owner/repo@ref` |
+| **npm / pnpm / yarn** | `package.json` (lockfile-aware) |
+| **Python** | `pyproject.toml` (uv, Poetry, PEP 621), `requirements.txt` |
 
 ## Usage
 
-```text
-Check and update dependencies across package managers
-
+```
 Usage: ruckup [OPTIONS] [COMMAND]
 
 Commands:
   check   Check for available dependency updates (default)
   update  Interactively select and apply dependency updates
   list    List detected dependency files and their dependencies
-  help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -o, --only <ONLY>      Only check these specific package managers (cargo, docker, github-actions, npm, pyproject, requirements)
+  -o, --only <ONLY>      Comma-separated list of ecosystems to check
+                         (cargo, docker, github-actions, npm, pyproject, requirements)
   -f, --filter <FILTER>  Filter to specific dependency names
   -h, --help             Print help
   -V, --version          Print version
 ```
 
+`check` is the default command, so `ruckup` and `ruckup check` are equivalent.
+
 ## Examples
 
-Check all supported manifests in the current directory:
-
 ```bash
+# Check everything in the current directory
 ruckup
-```
 
-Check only Cargo dependencies:
-
-```bash
+# Check only Cargo dependencies
 ruckup --only cargo
-```
 
-Check only GitHub Actions versions:
-
-```bash
+# Check only GitHub Actions workflow pins
 ruckup check --only github-actions
-```
 
-Check only npm dependencies matching a package name:
-
-```bash
+# Check npm packages and filter to a specific name
 ruckup check --only npm --filter react
-```
 
-Check only Docker image tags:
-
-```bash
-ruckup check --only docker
-```
-
-List detected dependencies without checking registries:
-
-```bash
-ruckup list
-```
-
-Interactively choose updates:
-
-```bash
-ruckup update
-```
-
-Update everything without prompts:
-
-```bash
-ruckup update --all
-```
-
-Check only Python dependencies:
-
-```bash
-ruckup check --only pyproject
-```
-
-Check only `requirements.txt` dependencies:
-
-```bash
-ruckup check --only requirements
-```
-
-Filter multiple ecosystems or names with comma-separated values:
-
-```bash
+# Check multiple ecosystems at once
 ruckup check --only cargo,npm --filter serde,clap
+
+# List all detected dependencies without hitting registries
+ruckup list
+
+# Interactively choose which updates to apply
+ruckup update
+
+# Apply all available updates without prompts
+ruckup update --all
 ```
 
 ## Configuration
 
-Configuration is resolved in this order, with later layers winning:
+Configuration is resolved in this order (later entries win):
 
-1. built-in defaults
-2. `~/.ruckuprc`
-3. `./.ruckuprc`
+1. Built-in defaults
+2. `~/.ruckuprc` (global)
+3. `./.ruckuprc` (project)
 4. `RUCKUP_*` environment variables
 
-Both TOML and JSON are supported for `.ruckuprc`.
+Both TOML and JSON formats are supported for `.ruckuprc`.
 
-### Supported settings
+### Settings
 
-- `preserve_range`
-- `cargo_concurrency`
-- `npm_concurrency`
-- `pypi_concurrency`
-- `github_actions_concurrency`
-- `docker_concurrency`
+| Setting | Env var | Default | Description |
+|---|---|---|---|
+| `preserve_range` | `RUCKUP_PRESERVE_RANGE` | `true` | Keep existing version range prefixes when updating |
+| `cargo_concurrency` | `RUCKUP_CARGO_CONCURRENCY` | `4` | Concurrent crates.io requests |
+| `npm_concurrency` | `RUCKUP_NPM_CONCURRENCY` | `16` | Concurrent npm registry requests |
+| `pypi_concurrency` | `RUCKUP_PYPI_CONCURRENCY` | `10` | Concurrent PyPI requests |
+| `github_actions_concurrency` | `RUCKUP_GITHUB_ACTIONS_CONCURRENCY` | `8` | Concurrent GitHub API requests |
+| `docker_concurrency` | `RUCKUP_DOCKER_CONCURRENCY` | `8` | Concurrent Docker Hub requests |
 
 ### Example `.ruckuprc`
 
@@ -212,37 +158,22 @@ github_actions_concurrency = 8
 docker_concurrency = 8
 ```
 
-### Environment variables
-
-- `RUCKUP_PRESERVE_RANGE`
-- `RUCKUP_CARGO_CONCURRENCY`
-- `RUCKUP_NPM_CONCURRENCY`
-- `RUCKUP_PYPI_CONCURRENCY`
-- `RUCKUP_GITHUB_ACTIONS_CONCURRENCY`
-- `RUCKUP_DOCKER_CONCURRENCY`
-
-Examples:
+### Environment variable examples
 
 ```bash
 RUCKUP_PRESERVE_RANGE=false ruckup update --all
 RUCKUP_NPM_CONCURRENCY=8 ruckup check --only npm
-RUCKUP_GITHUB_ACTIONS_CONCURRENCY=4 ruckup check --only github-actions
 RUCKUP_DOCKER_CONCURRENCY=4 ruckup check --only docker
 ```
 
 ## Notes
 
-- `check` is the default command, so `ruckup` and `ruckup check` are equivalent.
-- Docker support currently updates tagged Docker Hub images in `Dockerfile*`, `docker-compose.yml/.yaml`, and `compose.yml/.yaml`; unsupported registries and floating tags are listed but not upgraded.
-- npm results include peer dependency conflict reporting so you can see what is blocking an upgrade.
-- GitHub Actions updates rewrite pinned `uses: owner/repo@ref` workflow references; floating refs like `stable` and `release/v1` are left alone.
-- Python dependency detection only activates for `pyproject.toml` files that actually declare Python dependencies.
-- `requirements.txt` support is intentionally scoped to standard package spec lines; pip directives, editable installs, and direct URL requirements are ignored.
-
-## Release Status
-
-The repository currently includes CI and release automation, with crates.io publishing prioritized first. Additional package publishing targets can be enabled incrementally as the release workflow evolves.
+- Docker support targets Docker Hub images with semver-like tags; unsupported registries and floating tags are listed but not upgraded.
+- npm output includes peer dependency conflict reporting so you can see what is blocking an upgrade.
+- GitHub Actions updates rewrite pinned `uses: owner/repo@ref` references; floating refs like `stable` are left alone.
+- Python detection only activates for `pyproject.toml` files that declare Python dependencies.
+- `requirements.txt` packaging directives (editable installs, direct URLs, pip flags) are intentionally ignored.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT — see [LICENSE](LICENSE).
