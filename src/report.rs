@@ -1,10 +1,11 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
-use printpdf::{BuiltinFont, Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, Point, Pt, TextItem};
+use lopdf::{Document, Object, Stream, content::Content, content::Operation, dictionary};
 use serde::Deserialize;
+use tokio::sync::OnceCell;
 
 use crate::http;
 use crate::plugin::Dependency;
@@ -60,12 +61,14 @@ pub struct DependencyReport {
     pub diff_links: Vec<LinkRef>,
     pub changelog_links: Vec<LinkRef>,
     pub security_links: Vec<LinkRef>,
+    pub security_findings: Vec<String>,
     pub supply_chain: SupplyChainDelta,
 }
 
 #[derive(Clone, Debug)]
 pub struct PluginReport {
     pub plugin: String,
+    pub security_findings: Vec<String>,
     pub dependencies: Vec<DependencyReport>,
 }
 
@@ -88,6 +91,13 @@ pub async fn build_dependency_reports(
         .buffer_unordered(8)
         .collect()
         .await
+}
+
+pub async fn plugin_security_findings(plugin_name: &str) -> Vec<String> {
+    if plugin_name.eq_ignore_ascii_case("cargo") {
+        return cargo_workspace_archived_findings().await;
+    }
+    Vec::new()
 }
 
 pub fn write_reports(
@@ -126,9 +136,9 @@ pub fn write_reports(
     Ok(targets.into_iter().map(|(_, p)| p).collect())
 }
 
-pub fn open_best_effort(paths: &[PathBuf]) {
+pub fn open_best_effort(paths: &[PathBuf]) -> bool {
     if paths.is_empty() {
-        return;
+        return false;
     }
 
     let preferred = paths
@@ -140,8 +150,39 @@ pub fn open_best_effort(paths: &[PathBuf]) {
         && let Ok(abs) = path.canonicalize()
     {
         let target = format!("file://{}", abs.to_string_lossy());
-        let _ = webbrowser::open(&target);
+        if webbrowser::open(&target).is_ok() {
+            return true;
+        }
+
+        if cfg!(target_os = "linux") {
+            return std::process::Command::new("xdg-open")
+                .arg(&abs)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+        }
+
+        if cfg!(target_os = "macos") {
+            return std::process::Command::new("open")
+                .arg(&abs)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+        }
+
+        if cfg!(target_os = "windows") {
+            return std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("start")
+                .arg("")
+                .arg(&abs)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+        }
     }
+
+    false
 }
 
 async fn analyze_dependency(plugin_name: &str, dep: &Dependency) -> DependencyReport {
@@ -156,6 +197,7 @@ async fn analyze_dependency(plugin_name: &str, dep: &Dependency) -> DependencyRe
     let mut diff_links = Vec::new();
     let mut changelog_links = Vec::new();
     let mut security_links = Vec::new();
+    let mut security_findings = Vec::new();
     let mut supply_chain = SupplyChainDelta {
         added: Vec::new(),
         removed: Vec::new(),
@@ -167,7 +209,7 @@ async fn analyze_dependency(plugin_name: &str, dep: &Dependency) -> DependencyRe
         "cargo" => {
             let (repo, homepage) = cargo_repository(&dep.name).await;
             if let Some(url) = repo.clone() {
-                if let Some(link) = github_compare_link(&url, &dep.current_version, &latest) {
+                if let Some(link) = github_compare_link(&url, &dep.current_version, &latest).await {
                     diff_links.push(LinkRef {
                         label: "SCM diff".to_string(),
                         url: link,
@@ -203,6 +245,8 @@ async fn analyze_dependency(plugin_name: &str, dep: &Dependency) -> DependencyRe
                 },
             ];
 
+            security_findings = cargo_workspace_archived_findings().await;
+
             if let (Some(cur), Some(new)) = (
                 extract_version_core(&dep.current_version),
                 extract_version_core(&latest),
@@ -215,7 +259,8 @@ async fn analyze_dependency(plugin_name: &str, dep: &Dependency) -> DependencyRe
         "npm" => {
             let meta = npm_package_meta(&dep.name).await;
             if let Some(repo) = meta.repository.clone() {
-                if let Some(link) = github_compare_link(&repo, &dep.current_version, &latest) {
+                if let Some(link) = github_compare_link(&repo, &dep.current_version, &latest).await
+                {
                     diff_links.push(LinkRef {
                         label: "SCM diff".to_string(),
                         url: link,
@@ -267,7 +312,8 @@ async fn analyze_dependency(plugin_name: &str, dep: &Dependency) -> DependencyRe
         "pyproject" | "requirements" => {
             let meta = pypi_project_meta(&dep.name).await;
             if let Some(repo) = meta.repository.clone() {
-                if let Some(link) = github_compare_link(&repo, &dep.current_version, &latest) {
+                if let Some(link) = github_compare_link(&repo, &dep.current_version, &latest).await
+                {
                     diff_links.push(LinkRef {
                         label: "SCM diff".to_string(),
                         url: link,
@@ -317,13 +363,15 @@ async fn analyze_dependency(plugin_name: &str, dep: &Dependency) -> DependencyRe
         "github-actions" => {
             let repo = dep.name.split('/').take(2).collect::<Vec<_>>().join("/");
             if repo.contains('/') {
-                diff_links.push(LinkRef {
-                    label: "SCM diff".to_string(),
-                    url: format!(
-                        "https://github.com/{repo}/compare/{}...{}",
-                        dep.current_version, latest
-                    ),
-                });
+                let repo_url = format!("https://github.com/{repo}");
+                if let Some(link) =
+                    github_compare_link(&repo_url, &dep.current_version, &latest).await
+                {
+                    diff_links.push(LinkRef {
+                        label: "SCM diff".to_string(),
+                        url: link,
+                    });
+                }
                 changelog_links.push(LinkRef {
                     label: "Releases".to_string(),
                     url: format!("https://github.com/{repo}/releases"),
@@ -380,6 +428,7 @@ async fn analyze_dependency(plugin_name: &str, dep: &Dependency) -> DependencyRe
         diff_links,
         changelog_links,
         security_links,
+        security_findings,
         supply_chain,
     }
 }
@@ -455,6 +504,12 @@ fn render_text(report: &UpgradeReport) -> String {
 
     for plugin in &report.plugins {
         out.push_str(&format!("== {} ==\n", plugin.plugin));
+        if !plugin.security_findings.is_empty() {
+            out.push_str("  Security findings (full dependency tree):\n");
+            for finding in &plugin.security_findings {
+                out.push_str(&format!("    - {}\n", finding));
+            }
+        }
         for dep in &plugin.dependencies {
             out.push_str(&format!(
                 "- {}: {} -> {} ({})\n",
@@ -463,12 +518,23 @@ fn render_text(report: &UpgradeReport) -> String {
             write_text_link_group(&mut out, "Diff", &dep.diff_links);
             write_text_link_group(&mut out, "Changelog", &dep.changelog_links);
             write_text_link_group(&mut out, "Security", &dep.security_links);
+            write_text_findings(&mut out, &dep.security_findings);
             write_supply_chain_text(&mut out, &dep.supply_chain);
             out.push('\n');
         }
     }
 
     out
+}
+
+fn write_text_findings(out: &mut String, findings: &[String]) {
+    if findings.is_empty() {
+        return;
+    }
+    out.push_str("  Security findings:\n");
+    for finding in findings {
+        out.push_str(&format!("    - {}\n", finding));
+    }
 }
 
 fn write_text_link_group(out: &mut String, title: &str, links: &[LinkRef]) {
@@ -514,6 +580,13 @@ fn render_markdown(report: &UpgradeReport) -> String {
 
     for plugin in &report.plugins {
         out.push_str(&format!("## {}\n\n", plugin.plugin));
+        if !plugin.security_findings.is_empty() {
+            out.push_str("- Security findings (full dependency tree):\n");
+            for finding in &plugin.security_findings {
+                out.push_str(&format!("  - {}\n", finding));
+            }
+            out.push('\n');
+        }
         for dep in &plugin.dependencies {
             out.push_str(&format!(
                 "### {}\n\n- Current: `{}`\n- Latest: `{}`\n- Semver impact: **{}**\n",
@@ -523,12 +596,23 @@ fn render_markdown(report: &UpgradeReport) -> String {
             write_markdown_links(&mut out, "Diff links", &dep.diff_links);
             write_markdown_links(&mut out, "Changelog links", &dep.changelog_links);
             write_markdown_links(&mut out, "Security links", &dep.security_links);
+            write_markdown_findings(&mut out, &dep.security_findings);
             write_markdown_supply_chain(&mut out, &dep.supply_chain);
             out.push('\n');
         }
     }
 
     out
+}
+
+fn write_markdown_findings(out: &mut String, findings: &[String]) {
+    if findings.is_empty() {
+        return;
+    }
+    out.push_str("\n- Security findings:\n");
+    for finding in findings {
+        out.push_str(&format!("  - {}\n", finding));
+    }
 }
 
 fn write_markdown_links(out: &mut String, title: &str, links: &[LinkRef]) {
@@ -581,6 +665,14 @@ fn render_html(report: &UpgradeReport) -> String {
 
     for plugin in &report.plugins {
         out.push_str(&format!("<h2>{}</h2>", escape_html(&plugin.plugin)));
+        if !plugin.security_findings.is_empty() {
+            out.push_str("<article>");
+            out.push_str("<h3>Security findings (full dependency tree)</h3><ul>");
+            for finding in &plugin.security_findings {
+                out.push_str(&format!("<li>{}</li>", escape_html(finding)));
+            }
+            out.push_str("</ul></article>");
+        }
         for dep in &plugin.dependencies {
             out.push_str("<article>");
             out.push_str(&format!("<h3>{}</h3>", escape_html(&dep.name)));
@@ -593,6 +685,7 @@ fn render_html(report: &UpgradeReport) -> String {
             write_html_links(&mut out, "Diff links", &dep.diff_links);
             write_html_links(&mut out, "Changelog links", &dep.changelog_links);
             write_html_links(&mut out, "Security links", &dep.security_links);
+            write_html_findings(&mut out, &dep.security_findings);
             write_html_supply_chain(&mut out, &dep.supply_chain);
             out.push_str("</article>");
         }
@@ -600,6 +693,17 @@ fn render_html(report: &UpgradeReport) -> String {
 
     out.push_str("</main></body></html>");
     out
+}
+
+fn write_html_findings(out: &mut String, findings: &[String]) {
+    if findings.is_empty() {
+        return;
+    }
+    out.push_str("<strong>Security findings</strong><ul>");
+    for finding in findings {
+        out.push_str(&format!("<li>{}</li>", escape_html(finding)));
+    }
+    out.push_str("</ul>");
 }
 
 fn write_html_links(out: &mut String, title: &str, links: &[LinkRef]) {
@@ -649,46 +753,303 @@ fn escape_html(input: &str) -> String {
 }
 
 fn write_pdf(path: &Path, text: &str) -> Result<()> {
-    let mut doc = PdfDocument::new("ruckup upgrade report");
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+        "Encoding" => "WinAnsiEncoding",
+    });
+
     let wrapped = wrap_text_lines(text, 110);
     let lines_per_page = 55usize;
-    let mut pages = Vec::new();
+    let mut page_ids = Vec::new();
 
     for chunk in wrapped.chunks(lines_per_page) {
         let mut ops = vec![
-            Op::StartTextSection,
-            Op::SetFont {
-                font: printpdf::ops::PdfFontHandle::Builtin(BuiltinFont::Helvetica),
-                size: Pt(10.0),
-            },
-            Op::SetLineHeight { lh: Pt(14.0) },
-            Op::SetTextCursor {
-                pos: Point::new(Mm(12.0), Mm(287.0)),
-            },
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), Object::Real(10.0)]),
+            Operation::new("TL", vec![Object::Real(14.0)]),
+            Operation::new("Td", vec![Object::Real(36.0), Object::Real(806.0)]),
         ];
 
-        for (index, raw_line) in chunk.iter().enumerate() {
-            if index > 0 {
-                ops.push(Op::AddLineBreak);
+        for (idx, raw_line) in chunk.iter().enumerate() {
+            if idx > 0 {
+                ops.push(Operation::new("T*", vec![]));
             }
-            ops.push(Op::ShowText {
-                items: vec![TextItem::Text(raw_line.clone())],
-            });
+            ops.push(Operation::new(
+                "Tj",
+                vec![Object::string_literal(raw_line.as_str())],
+            ));
         }
 
-        ops.push(Op::EndTextSection);
-        pages.push(PdfPage::new(Mm(210.0), Mm(297.0), ops));
+        ops.push(Operation::new("ET", vec![]));
+        let content = Content { operations: ops };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode()?));
+
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Contents" => content_id,
+            "Resources" => dictionary! {
+                "Font" => dictionary! {
+                    "F1" => font_id,
+                },
+            },
+        });
+        page_ids.push(page_id);
     }
 
-    if pages.is_empty() {
-        pages.push(PdfPage::new(Mm(210.0), Mm(297.0), Vec::new()));
+    if page_ids.is_empty() {
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Resources" => dictionary! {
+                "Font" => dictionary! {
+                    "F1" => font_id,
+                },
+            },
+        });
+        page_ids.push(page_id);
     }
 
-    doc.with_pages(pages);
-    let mut warnings = Vec::new();
-    let bytes = doc.save(&PdfSaveOptions::default(), &mut warnings);
-    std::fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
+    let kids = page_ids
+        .iter()
+        .copied()
+        .map(Object::Reference)
+        .collect::<Vec<_>>();
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(kids),
+            "Count" => Object::Integer(page_ids.len() as i64),
+        }),
+    );
+
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    doc.compress();
+    doc.save(path)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct CargoMetadataResponse {
+    #[serde(default)]
+    packages: Vec<CargoMetadataPackage>,
+    #[serde(default)]
+    workspace_members: Vec<String>,
+    resolve: Option<CargoMetadataResolve>,
+}
+
+#[derive(Deserialize)]
+struct CargoMetadataPackage {
+    id: String,
+    name: String,
+    version: String,
+    repository: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CargoMetadataResolve {
+    #[serde(default)]
+    nodes: Vec<CargoMetadataNode>,
+}
+
+#[derive(Deserialize)]
+struct CargoMetadataNode {
+    id: String,
+    #[serde(default)]
+    deps: Vec<CargoMetadataNodeDep>,
+}
+
+#[derive(Deserialize)]
+struct CargoMetadataNodeDep {
+    pkg: String,
+}
+
+#[derive(Deserialize)]
+struct GithubRepoResponse {
+    archived: bool,
+}
+
+#[derive(Deserialize)]
+struct GithubMatchingRef {
+    #[serde(rename = "ref")]
+    git_ref: String,
+}
+
+static CARGO_ARCHIVED_FINDINGS: OnceCell<Vec<String>> = OnceCell::const_new();
+
+async fn cargo_workspace_archived_findings() -> Vec<String> {
+    CARGO_ARCHIVED_FINDINGS
+        .get_or_init(build_cargo_archived_findings)
+        .await
+        .clone()
+}
+
+async fn build_cargo_archived_findings() -> Vec<String> {
+    let output = match tokio::process::Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--locked")
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output,
+        _ => {
+            return vec![
+                "Could not evaluate full Cargo dependency tree maintenance status.".to_string(),
+            ];
+        }
+    };
+
+    let metadata: CargoMetadataResponse = match serde_json::from_slice(&output.stdout) {
+        Ok(value) => value,
+        Err(_) => {
+            return vec![
+                "Could not parse Cargo metadata for full dependency tree analysis.".to_string(),
+            ];
+        }
+    };
+
+    let package_by_id: HashMap<_, _> = metadata
+        .packages
+        .into_iter()
+        .map(|pkg| (pkg.id.clone(), pkg))
+        .collect();
+
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    if let Some(resolve) = metadata.resolve {
+        for node in resolve.nodes {
+            let deps = node.deps.into_iter().map(|d| d.pkg).collect::<Vec<_>>();
+            edges.insert(node.id, deps);
+        }
+    }
+
+    let roots = if metadata.workspace_members.is_empty() {
+        package_by_id.keys().cloned().collect::<Vec<_>>()
+    } else {
+        metadata.workspace_members
+    };
+
+    let mut repo_archived_cache: HashMap<String, bool> = HashMap::new();
+    let mut findings = Vec::new();
+
+    for (pkg_id, pkg) in &package_by_id {
+        let Some(repo) = pkg
+            .repository
+            .as_deref()
+            .and_then(normalize_repo_url)
+            .filter(|url| url.starts_with("https://github.com/"))
+        else {
+            continue;
+        };
+
+        let archived = if let Some(known) = repo_archived_cache.get(&repo) {
+            *known
+        } else {
+            let status = github_repo_is_archived(&repo).await.unwrap_or(false);
+            repo_archived_cache.insert(repo.clone(), status);
+            status
+        };
+
+        if !archived {
+            continue;
+        }
+
+        if let Some(path) = shortest_dependency_path(&roots, &edges, pkg_id) {
+            let path_text = path
+                .iter()
+                .map(|id| {
+                    package_by_id
+                        .get(id)
+                        .map(|p| p.name.as_str())
+                        .unwrap_or("unknown")
+                })
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            findings.push(format!(
+                "Archived crate detected: {} {} via {}",
+                pkg.name, pkg.version, path_text
+            ));
+        } else {
+            findings.push(format!(
+                "Archived crate detected: {} {} (path unavailable)",
+                pkg.name, pkg.version
+            ));
+        }
+    }
+
+    findings.sort();
+    findings.dedup();
+    findings
+}
+
+async fn github_repo_is_archived(repo_url: &str) -> Option<bool> {
+    let path = repo_url
+        .strip_prefix("https://github.com/")?
+        .trim_end_matches('/');
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let client = http::github_client().ok()?;
+    let endpoint = format!("https://api.github.com/repos/{owner}/{repo}");
+    let response: Result<GithubRepoResponse> =
+        http::get_json_with_retries(|| client.get(&endpoint)).await;
+    response.ok().map(|r| r.archived)
+}
+
+fn shortest_dependency_path(
+    roots: &[String],
+    edges: &HashMap<String, Vec<String>>,
+    target: &str,
+) -> Option<Vec<String>> {
+    let mut queue = VecDeque::new();
+    let mut visited = HashSet::new();
+    let mut parent: HashMap<String, String> = HashMap::new();
+
+    for root in roots {
+        queue.push_back(root.clone());
+        visited.insert(root.clone());
+    }
+
+    while let Some(node) = queue.pop_front() {
+        if node == target {
+            let mut path = vec![node.clone()];
+            let mut cur = node;
+            while let Some(prev) = parent.get(&cur).cloned() {
+                path.push(prev.clone());
+                cur = prev;
+            }
+            path.reverse();
+            return Some(path);
+        }
+
+        if let Some(children) = edges.get(&node) {
+            for child in children {
+                if visited.insert(child.clone()) {
+                    parent.insert(child.clone(), node.clone());
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn wrap_text_lines(text: &str, max_chars: usize) -> Vec<String> {
@@ -767,13 +1128,108 @@ fn extract_version_core(spec: &str) -> Option<String> {
     Some(tail[..len].to_string())
 }
 
-fn github_compare_link(repo_url: &str, current: &str, latest: &str) -> Option<String> {
+async fn github_compare_link(repo_url: &str, current: &str, latest: &str) -> Option<String> {
     let repo = normalize_repo_url(repo_url)?;
-    Some(format!(
-        "{repo}/compare/{}...{}",
-        extract_version_core(current)?,
-        extract_version_core(latest)?
-    ))
+    let (owner, name) = github_repo_owner_name(&repo)?;
+    let current_ref = resolve_github_compare_ref(&owner, &name, current).await;
+    let latest_ref = resolve_github_compare_ref(&owner, &name, latest).await;
+
+    match (current_ref, latest_ref) {
+        (Some(current_ref), Some(latest_ref)) => {
+            Some(format!("{repo}/compare/{current_ref}...{latest_ref}"))
+        }
+        _ => Some(format!(
+            "{repo}/compare/{}...{}",
+            extract_version_core(current)?,
+            extract_version_core(latest)?
+        )),
+    }
+}
+
+fn github_repo_owner_name(repo_url: &str) -> Option<(String, String)> {
+    let trimmed = repo_url.strip_prefix("https://github.com/")?;
+    let mut parts = trimmed.split('/');
+    let owner = parts.next()?.to_string();
+    let name = parts.next()?.to_string();
+    Some((owner, name))
+}
+
+async fn resolve_github_compare_ref(owner: &str, repo: &str, version: &str) -> Option<String> {
+    let client = http::github_client().ok()?;
+    let candidates = github_ref_candidates(version);
+
+    for candidate in &candidates {
+        if github_ref_exists(&client, owner, repo, "tags", candidate).await {
+            return Some(candidate.clone());
+        }
+    }
+
+    for candidate in &candidates {
+        if github_ref_exists(&client, owner, repo, "heads", candidate).await {
+            return Some(candidate.clone());
+        }
+    }
+
+    None
+}
+
+fn github_ref_candidates(version: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    for value in [
+        Some(version.trim().to_string()),
+        extract_version_core(version),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.is_empty() {
+            continue;
+        }
+
+        candidates.push(value.clone());
+
+        let without_v = value.trim_start_matches('v').to_string();
+        if without_v != value {
+            candidates.push(without_v.clone());
+        }
+        if !value.starts_with('v') && value.chars().any(|c| c.is_ascii_digit()) {
+            candidates.push(format!("v{value}"));
+        }
+        if without_v.chars().any(|c| c.is_ascii_digit()) {
+            candidates.push(format!("release-{without_v}"));
+            candidates.push(format!("release/{without_v}"));
+        }
+    }
+
+    let mut unique = Vec::new();
+    for candidate in candidates {
+        if !unique.contains(&candidate) {
+            unique.push(candidate);
+        }
+    }
+    unique
+}
+
+async fn github_ref_exists(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    kind: &str,
+    candidate: &str,
+) -> bool {
+    let encoded = candidate.replace('/', "%2F");
+    let url =
+        format!("https://api.github.com/repos/{owner}/{repo}/git/matching-refs/{kind}/{encoded}");
+    let response: Result<Vec<GithubMatchingRef>> =
+        http::get_json_with_retries(|| client.get(&url)).await;
+
+    match response {
+        Ok(refs) => refs
+            .into_iter()
+            .any(|git_ref| git_ref.git_ref == format!("refs/{kind}/{candidate}")),
+        Err(_) => false,
+    }
 }
 
 fn trim_trailing_slash(value: &str) -> &str {

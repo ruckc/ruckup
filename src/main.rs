@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
-use dialoguer::MultiSelect;
 use dialoguer::console::{Key, Term};
 
 use cli::{Cli, Commands, ReportFormatArg};
@@ -65,29 +64,39 @@ fn map_report_format(value: &ReportFormatArg) -> report::ReportFormat {
 
 async fn open_interactive_report_for_plugins(
     plugin_deps: &[(String, Vec<Dependency>)],
-) -> Result<()> {
+) -> Result<String> {
     let mut plugin_reports = Vec::new();
     let mut total_candidates = 0usize;
+    let plugin_count = plugin_deps
+        .iter()
+        .filter(|(_, deps)| !deps.is_empty())
+        .count() as u64;
+
+    if plugin_count == 0 {
+        return Ok(format!(
+            "{} no upgrade candidates available for report",
+            "⚠".yellow()
+        ));
+    }
+
+    let pb = progress::report_progress_bar(plugin_count);
 
     for (plugin_name, deps) in plugin_deps {
         if deps.is_empty() {
             continue;
         }
+        pb.set_message(plugin_name.to_string());
         total_candidates += deps.len();
         let entries = report::build_dependency_reports(plugin_name, deps.clone()).await;
+        let security_findings = report::plugin_security_findings(plugin_name).await;
         plugin_reports.push(report::PluginReport {
             plugin: plugin_name.clone(),
+            security_findings,
             dependencies: entries,
         });
+        pb.inc(1);
     }
-
-    if plugin_reports.is_empty() {
-        println!(
-            "  {} no upgrade candidates available for report",
-            "⚠".yellow()
-        );
-        return Ok(());
-    }
+    pb.finish_and_clear();
 
     let generated_at_utc = format!("{:?}", std::time::SystemTime::now());
     let bundle = report::UpgradeReport {
@@ -95,20 +104,155 @@ async fn open_interactive_report_for_plugins(
         plugins: plugin_reports,
     };
 
-    let output_base = "ruckup-update-report-consolidated";
-    let paths = report::write_reports(&bundle, &[report::ReportFormat::Html], output_base)?;
-    report::open_best_effort(&paths);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let output_base = format!("ruckup-update-report-{timestamp}");
+    let paths = report::write_reports(&bundle, &[report::ReportFormat::Html], &output_base)?;
+    let opened = report::open_best_effort(&paths);
 
-    if let Some(path) = paths.first() {
-        println!(
-            "  {} opened consolidated report ({} candidates): {}",
+    let message = if let Some(path) = paths.first() {
+        if opened {
+            format!(
+                "{} opened upgrade report ({} candidates): {}",
+                "✓".green(),
+                total_candidates,
+                path.display()
+            )
+        } else {
+            format!(
+                "{} generated upgrade report ({} candidates): {} (auto-open failed)",
+                "⚠".yellow(),
+                total_candidates,
+                path.display()
+            )
+        }
+    } else {
+        format!(
+            "{} generated upgrade report ({} candidates)",
             "✓".green(),
             total_candidates,
-            path.display()
-        );
-    }
+        )
+    };
 
-    Ok(())
+    Ok(message)
+}
+
+async fn select_dependencies_interactive(
+    plugin_label: &str,
+    updatable: &[Dependency],
+    report_candidates: &[(String, Vec<Dependency>)],
+) -> Result<Vec<String>> {
+    let term = Term::stderr();
+    let mut cursor = 0usize;
+    let mut selected = vec![false; updatable.len()];
+    let mut rendered_lines = 0usize;
+    let mut status_message: Option<String> = None;
+
+    loop {
+        if rendered_lines > 0 {
+            term.clear_last_lines(rendered_lines)?;
+        }
+
+        let mut lines = 0usize;
+        term.write_line(&format!(
+            "Select dependencies to update for {}",
+            plugin_label
+        ))?;
+        lines += 1;
+        term.write_line(&format!(
+            "  {}: r open report, ↑/↓ navigate, Space toggle, a toggle all, Enter confirm, Esc skip",
+            "keys".dimmed(),
+        ))?;
+        lines += 1;
+
+        if let Some(msg) = &status_message {
+            term.write_line(&format!("  {}", msg))?;
+            lines += 1;
+        }
+
+        for (idx, dep) in updatable.iter().enumerate() {
+            let latest = dep.latest_version.as_deref().unwrap_or("?");
+            let marker = if idx == cursor { ">" } else { " " };
+            let check = if selected[idx] { "x" } else { " " };
+            term.write_line(&format!(
+                "  {} [{}] {} {} → {}",
+                marker, check, dep.name, dep.current_version, latest
+            ))?;
+            lines += 1;
+        }
+
+        rendered_lines = lines;
+        status_message = None;
+        term.flush()?;
+
+        match term.read_key_raw()? {
+            Key::ArrowUp | Key::Char('k') => {
+                if cursor == 0 {
+                    cursor = updatable.len().saturating_sub(1);
+                } else {
+                    cursor -= 1;
+                }
+            }
+            Key::ArrowDown | Key::Char('j') => {
+                if !updatable.is_empty() {
+                    cursor = (cursor + 1) % updatable.len();
+                }
+            }
+            Key::Char(' ') => {
+                if !updatable.is_empty() {
+                    selected[cursor] = !selected[cursor];
+                }
+            }
+            Key::Char('a') | Key::Char('A') => {
+                let select_all = selected.iter().any(|v| !*v);
+                selected.fill(select_all);
+            }
+            Key::Char('r') | Key::Char('R') => {
+                if rendered_lines > 0 {
+                    term.clear_last_lines(rendered_lines)?;
+                    rendered_lines = 0;
+                }
+                term.write_line(&format!("  {} generating upgrade report...", "•".dimmed()))?;
+                term.flush()?;
+                let started = std::time::Instant::now();
+                let status = open_interactive_report_for_plugins(report_candidates).await?;
+                let elapsed = started.elapsed().as_millis();
+                status_message = Some(format!("{} ({} ms)", status, elapsed));
+            }
+            Key::Enter => {
+                let chosen = selected
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, checked)| {
+                        if *checked {
+                            Some(updatable[i].name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                if chosen.is_empty() {
+                    status_message = Some("No dependencies selected.".to_string());
+                    continue;
+                }
+
+                if rendered_lines > 0 {
+                    term.clear_last_lines(rendered_lines)?;
+                }
+                return Ok(chosen);
+            }
+            Key::Escape | Key::Char('q') => {
+                if rendered_lines > 0 {
+                    term.clear_last_lines(rendered_lines)?;
+                }
+                return Ok(Vec::new());
+            }
+            _ => {}
+        }
+    }
 }
 
 fn print_dep_table(deps: &[Dependency]) {
@@ -342,7 +486,7 @@ async fn cmd_update(
         failed_by_plugin.push(failed_checks);
     }
 
-    let consolidated_candidates: Vec<(String, Vec<Dependency>)> = plugins
+    let report_candidates: Vec<(String, Vec<Dependency>)> = plugins
         .iter()
         .zip(deps_by_plugin.iter())
         .filter_map(|(plugin, deps)| {
@@ -362,6 +506,7 @@ async fn cmd_update(
         let deps = &deps_by_plugin[idx];
         let total_checked = totals_by_plugin[idx];
         let failed_checks = failed_by_plugin[idx];
+        let updatable: Vec<_> = deps.iter().filter(|d| d.has_update()).collect();
 
         if failed_checks > 0 {
             println!(
@@ -373,49 +518,47 @@ async fn cmd_update(
             );
         }
 
-        let updatable: Vec<_> = deps.iter().filter(|d| d.has_update()).collect();
+        print_dep_table(deps);
+
         if updatable.is_empty() {
-            println!("  {} All dependencies are up to date.\n", "✓".green());
+            continue;
+        }
+    }
+
+    if report_candidates.is_empty() {
+        return Ok(());
+    }
+
+    if !update_all {
+        println!(
+            "  {}: r open report, ↑/↓ navigate, Space toggle, a toggle all, Enter confirm\n",
+            "keys".dimmed(),
+        );
+    }
+
+    for (idx, plugin) in plugins.iter().enumerate() {
+        let deps = &deps_by_plugin[idx];
+        let updatable: Vec<Dependency> = deps.iter().filter(|d| d.has_update()).cloned().collect();
+        if updatable.is_empty() {
             continue;
         }
 
         let selected_names: Vec<String> = if update_all {
             updatable.iter().map(|d| d.name.clone()).collect()
         } else {
-            let items: Vec<String> = updatable
-                .iter()
-                .map(|d| {
-                    let latest = d.latest_version.as_deref().unwrap_or("?");
-                    format!("{} {} → {}", d.name, d.current_version, latest)
-                })
-                .collect();
+            let selected = select_dependencies_interactive(
+                plugin.display_name(dir).as_ref(),
+                &updatable,
+                &report_candidates,
+            )
+            .await?;
 
-            println!(
-                "  {}: r open report, ↑/↓ navigate, Space toggle, a toggle all, Enter confirm\n",
-                "keys".dimmed(),
-            );
-
-            if let Ok(key) = Term::stderr().read_key()
-                && matches!(key, Key::Char('r') | Key::Char('R'))
-            {
-                open_interactive_report_for_plugins(&consolidated_candidates).await?;
-                println!();
-            }
-
-            let selections = MultiSelect::new()
-                .with_prompt("Select dependencies to update")
-                .items(&items)
-                .interact()?;
-
-            if selections.is_empty() {
+            if selected.is_empty() {
                 println!("  No dependencies selected.\n");
                 continue;
             }
 
-            selections
-                .iter()
-                .map(|&i| updatable[i].name.clone())
-                .collect()
+            selected
         };
 
         plugin.update(dir, &selected_names, config).await?;
@@ -471,8 +614,10 @@ async fn cmd_report(
         );
 
         let entries = report::build_dependency_reports(plugin.name(), updatable).await;
+        let security_findings = report::plugin_security_findings(plugin.name()).await;
         plugin_reports.push(report::PluginReport {
             plugin: plugin.name().to_string(),
+            security_findings,
             dependencies: entries,
         });
         println!("  {} Done.\n", "✓".green());
@@ -504,8 +649,11 @@ async fn cmd_report(
         println!("  - {}", path.display());
     }
 
-    if open {
-        report::open_best_effort(&output_paths);
+    if open && !report::open_best_effort(&output_paths) {
+        println!(
+            "{} Could not auto-open report. Open one of the paths above manually.",
+            "⚠".yellow()
+        );
     }
 
     Ok(())
