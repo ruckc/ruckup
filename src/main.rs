@@ -96,7 +96,7 @@ async fn open_interactive_report_for_plugins(
     };
 
     let output_base = "ruckup-update-report-consolidated";
-    let paths = report::write_reports(&bundle, &[report::ReportFormat::Html], &output_base)?;
+    let paths = report::write_reports(&bundle, &[report::ReportFormat::Html], output_base)?;
     report::open_best_effort(&paths);
 
     if let Some(path) = paths.first() {
