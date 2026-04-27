@@ -4,6 +4,7 @@ mod http;
 mod plugin;
 mod plugins;
 mod progress;
+mod report;
 
 use std::path::{Path, PathBuf};
 
@@ -11,8 +12,9 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use dialoguer::MultiSelect;
+use dialoguer::console::{Key, Term};
 
-use cli::{Cli, Commands};
+use cli::{Cli, Commands, ReportFormatArg};
 use plugin::{Dependency, Plugin};
 use plugins::cargo::CargoPlugin;
 use plugins::docker::DockerPlugin;
@@ -51,6 +53,63 @@ fn detect_plugins(dir: &Path, only: &Option<Vec<String>>) -> Vec<Box<dyn Plugin>
 }
 
 use plugin::DepType;
+
+fn map_report_format(value: &ReportFormatArg) -> report::ReportFormat {
+    match value {
+        ReportFormatArg::Text => report::ReportFormat::Text,
+        ReportFormatArg::Markdown => report::ReportFormat::Markdown,
+        ReportFormatArg::Html => report::ReportFormat::Html,
+        ReportFormatArg::Pdf => report::ReportFormat::Pdf,
+    }
+}
+
+async fn open_interactive_report_for_plugins(
+    plugin_deps: &[(String, Vec<Dependency>)],
+) -> Result<()> {
+    let mut plugin_reports = Vec::new();
+    let mut total_candidates = 0usize;
+
+    for (plugin_name, deps) in plugin_deps {
+        if deps.is_empty() {
+            continue;
+        }
+        total_candidates += deps.len();
+        let entries = report::build_dependency_reports(plugin_name, deps.clone()).await;
+        plugin_reports.push(report::PluginReport {
+            plugin: plugin_name.clone(),
+            dependencies: entries,
+        });
+    }
+
+    if plugin_reports.is_empty() {
+        println!(
+            "  {} no upgrade candidates available for report",
+            "⚠".yellow()
+        );
+        return Ok(());
+    }
+
+    let generated_at_utc = format!("{:?}", std::time::SystemTime::now());
+    let bundle = report::UpgradeReport {
+        generated_at_utc,
+        plugins: plugin_reports,
+    };
+
+    let output_base = "ruckup-update-report-consolidated";
+    let paths = report::write_reports(&bundle, &[report::ReportFormat::Html], &output_base)?;
+    report::open_best_effort(&paths);
+
+    if let Some(path) = paths.first() {
+        println!(
+            "  {} opened consolidated report ({} candidates): {}",
+            "✓".green(),
+            total_candidates,
+            path.display()
+        );
+    }
+
+    Ok(())
+}
 
 fn print_dep_table(deps: &[Dependency]) {
     if deps.is_empty() {
@@ -267,15 +326,42 @@ async fn cmd_update(
         return Ok(());
     }
 
-    for plugin in &plugins {
-        println!("{}", format!("── {} ──", plugin.display_name(dir)).bold());
+    let mut deps_by_plugin: Vec<Vec<Dependency>> = Vec::new();
+    let mut totals_by_plugin: Vec<usize> = Vec::new();
+    let mut failed_by_plugin: Vec<usize> = Vec::new();
 
+    for plugin in &plugins {
         let mut deps = plugin.check_updates(dir, config).await?;
         let total_checked = deps.len();
         let failed_checks = deps.iter().filter(|d| d.check_failed).count();
         if let Some(names) = filter {
             deps.retain(|d| names.iter().any(|n| d.name.contains(n.as_str())));
         }
+        deps_by_plugin.push(deps);
+        totals_by_plugin.push(total_checked);
+        failed_by_plugin.push(failed_checks);
+    }
+
+    let consolidated_candidates: Vec<(String, Vec<Dependency>)> = plugins
+        .iter()
+        .zip(deps_by_plugin.iter())
+        .filter_map(|(plugin, deps)| {
+            let updatable: Vec<Dependency> =
+                deps.iter().filter(|d| d.has_update()).cloned().collect();
+            if updatable.is_empty() {
+                None
+            } else {
+                Some((plugin.name().to_string(), updatable))
+            }
+        })
+        .collect();
+
+    for (idx, plugin) in plugins.iter().enumerate() {
+        println!("{}", format!("── {} ──", plugin.display_name(dir)).bold());
+
+        let deps = &deps_by_plugin[idx];
+        let total_checked = totals_by_plugin[idx];
+        let failed_checks = failed_by_plugin[idx];
 
         if failed_checks > 0 {
             println!(
@@ -305,9 +391,16 @@ async fn cmd_update(
                 .collect();
 
             println!(
-                "  {}: ↑/↓ navigate, Space toggle, a toggle all, Enter confirm\n",
+                "  {}: r open report, ↑/↓ navigate, Space toggle, a toggle all, Enter confirm\n",
                 "keys".dimmed(),
             );
+
+            if let Ok(key) = Term::stderr().read_key()
+                && matches!(key, Key::Char('r') | Key::Char('R'))
+            {
+                open_interactive_report_for_plugins(&consolidated_candidates).await?;
+                println!();
+            }
 
             let selections = MultiSelect::new()
                 .with_prompt("Select dependencies to update")
@@ -335,6 +428,89 @@ async fn cmd_update(
     Ok(())
 }
 
+async fn cmd_report(
+    dir: &Path,
+    only: &Option<Vec<String>>,
+    filter: &Option<Vec<String>>,
+    formats: &[ReportFormatArg],
+    output: &str,
+    open: bool,
+    config: &config::Config,
+) -> Result<()> {
+    let plugins = detect_plugins(dir, only);
+    if plugins.is_empty() {
+        println!(
+            "{}",
+            "No supported dependency files detected in the current directory.".yellow()
+        );
+        return Ok(());
+    }
+
+    let mut plugin_reports = Vec::new();
+    let mut total_candidates = 0usize;
+
+    for plugin in &plugins {
+        println!("{}", format!("── {} ──", plugin.display_name(dir)).bold());
+
+        let mut deps = plugin.check_updates(dir, config).await?;
+        if let Some(names) = filter {
+            deps.retain(|d| names.iter().any(|n| d.name.contains(n.as_str())));
+        }
+
+        let updatable: Vec<_> = deps.into_iter().filter(|d| d.has_update()).collect();
+        if updatable.is_empty() {
+            println!("  {} No upgrade candidates for report.\n", "✓".green());
+            continue;
+        }
+
+        total_candidates += updatable.len();
+        println!(
+            "  {} Building detailed report for {} dependencies...",
+            "•".dimmed(),
+            updatable.len()
+        );
+
+        let entries = report::build_dependency_reports(plugin.name(), updatable).await;
+        plugin_reports.push(report::PluginReport {
+            plugin: plugin.name().to_string(),
+            dependencies: entries,
+        });
+        println!("  {} Done.\n", "✓".green());
+    }
+
+    if plugin_reports.is_empty() {
+        println!(
+            "{}",
+            "No upgradable dependencies found, so no report was generated.".yellow()
+        );
+        return Ok(());
+    }
+
+    let generated_at_utc = format!("{:?}", std::time::SystemTime::now());
+    let report = report::UpgradeReport {
+        generated_at_utc,
+        plugins: plugin_reports,
+    };
+
+    let selected_formats: Vec<_> = formats.iter().map(map_report_format).collect();
+    let output_paths = report::write_reports(&report, &selected_formats, output)?;
+
+    println!(
+        "{} Generated report for {} upgrade candidates:",
+        "✓".green(),
+        total_candidates
+    );
+    for path in &output_paths {
+        println!("  - {}", path.display());
+    }
+
+    if open {
+        report::open_best_effort(&output_paths);
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -345,5 +521,10 @@ async fn main() -> Result<()> {
         None | Some(Commands::Check) => cmd_check(&dir, &cli.only, &cli.filter, &cfg).await,
         Some(Commands::List) => cmd_list(&dir, &cli.only).await,
         Some(Commands::Update { all }) => cmd_update(&dir, &cli.only, &cli.filter, all, &cfg).await,
+        Some(Commands::Report {
+            format,
+            output,
+            open,
+        }) => cmd_report(&dir, &cli.only, &cli.filter, &format, &output, open, &cfg).await,
     }
 }

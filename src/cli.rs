@@ -1,4 +1,12 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum ReportFormatArg {
+    Text,
+    Markdown,
+    Html,
+    Pdf,
+}
 
 #[derive(Parser)]
 #[command(
@@ -31,4 +39,24 @@ pub enum Commands {
     },
     /// List detected dependency files and their dependencies
     List,
+    /// Generate upgrade intelligence reports
+    Report {
+        /// Output formats (text, markdown, html, pdf)
+        #[arg(
+            short = 'F',
+            long = "format",
+            value_enum,
+            value_delimiter = ',',
+            default_value = "markdown"
+        )]
+        format: Vec<ReportFormatArg>,
+
+        /// Output path: file stem (default) or directory
+        #[arg(short = 'O', long, default_value = "ruckup-report")]
+        output: String,
+
+        /// Open the generated report in your default browser/app
+        #[arg(long)]
+        open: bool,
+    },
 }

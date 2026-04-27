@@ -97,3 +97,15 @@ fn update_all_in_empty_directory_is_graceful() {
         "No supported dependency files detected in the current directory.",
     ));
 }
+
+#[test]
+fn report_in_empty_directory_is_graceful() {
+    let temp = tempfile::tempdir().expect("failed to create temp dir");
+
+    let mut cmd = Command::cargo_bin("ruckup").expect("failed to load ruckup binary");
+    cmd.current_dir(temp.path()).args(["report"]);
+
+    cmd.assert().success().stdout(predicate::str::contains(
+        "No supported dependency files detected in the current directory.",
+    ));
+}
