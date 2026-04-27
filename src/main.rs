@@ -195,15 +195,11 @@ async fn select_dependencies_interactive(
                     cursor -= 1;
                 }
             }
-            Key::ArrowDown | Key::Char('j') => {
-                if !updatable.is_empty() {
-                    cursor = (cursor + 1) % updatable.len();
-                }
+            Key::ArrowDown | Key::Char('j') if !updatable.is_empty() => {
+                cursor = (cursor + 1) % updatable.len();
             }
-            Key::Char(' ') => {
-                if !updatable.is_empty() {
-                    selected[cursor] = !selected[cursor];
-                }
+            Key::Char(' ') if !updatable.is_empty() => {
+                selected[cursor] = !selected[cursor];
             }
             Key::Char('a') | Key::Char('A') => {
                 let select_all = selected.iter().any(|v| !*v);
