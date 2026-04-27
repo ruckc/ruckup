@@ -85,7 +85,7 @@ async fn open_interactive_report_for_plugins(
         if deps.is_empty() {
             continue;
         }
-        pb.set_message(plugin_name.to_string());
+            pb.set_message(plugin_name.to_string());
         total_candidates += deps.len();
         let entries = report::build_dependency_reports(plugin_name, deps.clone()).await;
         let security_findings = report::plugin_security_findings(plugin_name).await;
@@ -156,10 +156,7 @@ async fn select_dependencies_interactive(
         }
 
         let mut lines = 0usize;
-        term.write_line(&format!(
-            "Select dependencies to update for {}",
-            plugin_label
-        ))?;
+        term.write_line(&format!("Select dependencies to update for {}", plugin_label))?;
         lines += 1;
         term.write_line(&format!(
             "  {}: r open report, ↑/↓ navigate, Space toggle, a toggle all, Enter confirm, Esc skip",
