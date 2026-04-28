@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use serde::Deserialize;
+use serde_yaml::Value;
 
 use crate::config::Config;
 use crate::http;
@@ -78,11 +80,19 @@ fn workflow_files(dir: &Path) -> Result<Vec<PathBuf>> {
 
 fn parse_uses_value(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim_start();
-    if trimmed.starts_with('#') || !trimmed.starts_with("uses:") {
+    if trimmed.starts_with('#') {
         return None;
     }
 
-    let raw = trimmed[5..].trim();
+    let uses_line = if let Some(rest) = trimmed.strip_prefix("uses:") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("- uses:") {
+        rest
+    } else {
+        return None;
+    };
+
+    let raw = uses_line.trim();
     let value = raw
         .split_whitespace()
         .next()?
@@ -99,6 +109,68 @@ fn parse_uses_value(line: &str) -> Option<(String, String)> {
     }
 
     Some((name.to_string(), version.to_string()))
+}
+
+fn parse_action_ref(value: &str) -> Option<(String, String)> {
+    let value = value
+        .split_whitespace()
+        .next()?
+        .trim_matches('"')
+        .trim_matches('\'');
+
+    if value.starts_with("./") || value.starts_with("docker://") || value.starts_with("${{") {
+        return None;
+    }
+
+    let (name, version) = value.rsplit_once('@')?;
+    if !name.contains('/') || version.is_empty() {
+        return None;
+    }
+
+    Some((name.to_string(), version.to_string()))
+}
+
+fn mapping_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    let Value::Mapping(mapping) = value else {
+        return None;
+    };
+    mapping.get(Value::String(key.to_string()))
+}
+
+fn parse_workflow_uses(content: &str) -> Vec<(String, String)> {
+    let Ok(root) = serde_yaml::from_str::<Value>(content) else {
+        // Fall back to line parsing when YAML cannot be parsed.
+        return content.lines().filter_map(parse_uses_value).collect();
+    };
+
+    let mut refs = Vec::new();
+    let Some(jobs) = mapping_get(&root, "jobs") else {
+        return refs;
+    };
+
+    let Some(job_map) = jobs.as_mapping() else {
+        return refs;
+    };
+
+    for job in job_map.values() {
+        if let Some(uses) = mapping_get(job, "uses").and_then(Value::as_str)
+            && let Some(parsed) = parse_action_ref(uses)
+        {
+            refs.push(parsed);
+        }
+
+        if let Some(steps) = mapping_get(job, "steps").and_then(Value::as_sequence) {
+            for step in steps {
+                if let Some(uses) = mapping_get(step, "uses").and_then(Value::as_str)
+                    && let Some(parsed) = parse_action_ref(uses)
+                {
+                    refs.push(parsed);
+                }
+            }
+        }
+    }
+
+    refs
 }
 
 fn action_repo(name: &str) -> Option<&str> {
@@ -127,6 +199,30 @@ fn version_prefix(value: &str) -> Option<Vec<u64>> {
     match numbers {
         Some(parts) if !parts.is_empty() => Some(parts),
         _ => None,
+    }
+}
+
+fn compare_action_refs(left: &str, right: &str) -> Option<Ordering> {
+    let left_parts = version_prefix(left)?;
+    let right_parts = version_prefix(right)?;
+    let max_len = left_parts.len().max(right_parts.len());
+
+    for idx in 0..max_len {
+        let left = left_parts.get(idx).copied().unwrap_or(0);
+        let right = right_parts.get(idx).copied().unwrap_or(0);
+        match left.cmp(&right) {
+            Ordering::Equal => continue,
+            ordering => return Some(ordering),
+        }
+    }
+
+    Some(Ordering::Equal)
+}
+
+fn newer_action_ref<'a>(left: &'a str, right: &'a str) -> &'a str {
+    match compare_action_refs(left, right) {
+        Some(Ordering::Less) => right,
+        Some(Ordering::Greater) | Some(Ordering::Equal) | None => left,
     }
 }
 
@@ -163,9 +259,11 @@ async fn fetch_latest(client: &reqwest::Client, repo: &str) -> Result<String> {
         .send()
         .await?;
 
+    let mut best: Option<String> = None;
+
     if release.status().is_success() {
         let release: GithubRelease = release.json().await?;
-        return Ok(release.tag_name);
+        best = Some(release.tag_name);
     }
 
     let tag_url = format!("https://api.github.com/repos/{repo}/tags?per_page=1");
@@ -178,8 +276,15 @@ async fn fetch_latest(client: &reqwest::Client, repo: &str) -> Result<String> {
     if response.status().is_success() {
         let tags: Vec<GithubTag> = response.json().await?;
         if let Some(tag) = tags.into_iter().next() {
-            return Ok(tag.name);
+            best = Some(match &best {
+                Some(current) => newer_action_ref(current, &tag.name).to_string(),
+                None => tag.name,
+            });
         }
+    }
+
+    if let Some(best) = best {
+        return Ok(best);
     }
 
     fetch_latest_git_tag(repo)
@@ -300,10 +405,8 @@ impl Plugin for GithubActionsPlugin {
             let content = fs::read_to_string(&file)
                 .with_context(|| format!("failed to read {}", file.display()))?;
 
-            for line in content.lines() {
-                if let Some((name, version)) = parse_uses_value(line)
-                    && seen.insert((name.clone(), version.clone()))
-                {
+            for (name, version) in parse_workflow_uses(&content) {
+                if seen.insert((name.clone(), version.clone())) {
                     deps.push(Dependency::new(name, version, DepType::Build));
                 }
             }
@@ -396,12 +499,19 @@ impl Plugin for GithubActionsPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{action_ref_matches, parse_uses_value};
+    use std::cmp::Ordering;
+
+    use super::{action_ref_matches, compare_action_refs, parse_uses_value, parse_workflow_uses};
 
     #[test]
     fn parse_uses_value_extracts_repo_and_ref() {
         let parsed = parse_uses_value("uses: actions/checkout@v4").expect("expected parsed uses");
         assert_eq!(parsed.0, "actions/checkout");
+        assert_eq!(parsed.1, "v4");
+
+        let parsed = parse_uses_value("- uses: actions/setup-node@v4")
+            .expect("expected parsed list-item uses");
+        assert_eq!(parsed.0, "actions/setup-node");
         assert_eq!(parsed.1, "v4");
     }
 
@@ -415,5 +525,38 @@ mod tests {
     fn action_ref_matches_major_prefix() {
         assert!(action_ref_matches("v4", "v4.1.0"));
         assert!(!action_ref_matches("v3", "v4.1.0"));
+    }
+
+    #[test]
+    fn compare_action_refs_orders_semver() {
+        assert_eq!(compare_action_refs("v0.1.1", "v1.0.0"), Some(Ordering::Less));
+        assert_eq!(compare_action_refs("v1", "v1.0.0"), Some(Ordering::Equal));
+    }
+
+    #[test]
+    fn parse_workflow_uses_reads_step_and_job_uses() {
+        let yaml = r#"
+name: CI
+jobs:
+  call-reusable:
+    uses: org/workflow/.github/workflows/reusable.yml@v2
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: mcblair/configure-aws-profile-action@v0.1.1
+"#;
+
+        let refs = parse_workflow_uses(yaml);
+        assert!(refs
+            .iter()
+            .any(|(name, version)| name == "actions/checkout" && version == "v4"));
+        assert!(refs
+            .iter()
+            .any(|(name, version)| name == "mcblair/configure-aws-profile-action" && version == "v0.1.1"));
+        assert!(refs
+            .iter()
+            .any(|(name, version)| name == "org/workflow/.github/workflows/reusable.yml" && version == "v2"));
     }
 }

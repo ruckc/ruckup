@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use serde::Deserialize;
@@ -64,6 +64,10 @@ fn docker_manifest_paths(dir: &Path) -> Result<Vec<PathBuf>> {
             paths.push(path);
         }
     }
+    
+    // Add GitHub Actions workflow files
+    paths.extend(workflow_files(dir)?);
+    
     paths.sort();
     Ok(paths)
 }
@@ -77,6 +81,34 @@ fn is_compose_name(name: &str) -> bool {
         name,
         "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
     )
+}
+
+fn workflow_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let workflows = dir.join(".github").join("workflows");
+    if !workflows.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&workflows)
+        .with_context(|| format!("failed to read {}", workflows.display()))?
+    {
+        let path = entry?.path();
+        let ext = path.extension().and_then(|ext| ext.to_str());
+        if matches!(ext, Some("yml") | Some("yaml")) {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn is_workflow_file(path: &Path) -> bool {
+    path.ancestors()
+        .nth(1)
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "workflows")
 }
 
 fn strip_quotes(value: &str) -> &str {
@@ -149,6 +181,44 @@ fn parse_compose_occurrence(line: &str) -> Option<ParsedOccurrence> {
     }
 
     let remainder = trimmed.strip_prefix("image:")?.trim_start();
+    if remainder.is_empty() {
+        return None;
+    }
+
+    let token = if let Some(rest) = remainder.strip_prefix('"') {
+        &remainder[1..1 + rest.find('"')?]
+    } else if let Some(rest) = remainder.strip_prefix('\'') {
+        &remainder[1..1 + rest.find('\'')?]
+    } else {
+        remainder
+            .split_whitespace()
+            .next()?
+            .split('#')
+            .next()?
+            .trim()
+    };
+
+    let image = parse_image_reference(token)?;
+    let leading = line.len() - trimmed.len();
+    let start = leading + trimmed.find(token)?;
+    let end = start + token.len();
+
+    Some(ParsedOccurrence {
+        name: image.name,
+        current_version: image.current_version,
+        replace_start: start,
+        replace_end: end,
+        dep_type: DepType::Normal,
+    })
+}
+
+fn parse_workflow_occurrence(line: &str) -> Option<ParsedOccurrence> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return None;
+    }
+
+    let remainder = trimmed.strip_prefix("container:")?.trim_start();
     if remainder.is_empty() {
         return None;
     }
@@ -353,23 +423,38 @@ impl Plugin for DockerPlugin {
 
         for path in docker_manifest_paths(dir)? {
             let content = fs::read_to_string(&path)?;
-            let dep_type = if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(is_dockerfile_name)
-            {
-                DepType::Build
+            
+            if is_workflow_file(&path) {
+                // Handle GitHub Actions workflow files
+                for line in content.lines() {
+                    if let Some(occurrence) = parse_workflow_occurrence(line) {
+                        deps.push(Dependency::new(
+                            occurrence.name,
+                            occurrence.current_version,
+                            DepType::Normal,
+                        ));
+                    }
+                }
             } else {
-                DepType::Normal
-            };
+                // Handle Dockerfile and docker-compose files
+                let dep_type = if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_dockerfile_name)
+                {
+                    DepType::Build
+                } else {
+                    DepType::Normal
+                };
 
-            for line in content.lines() {
-                if let Some(occurrence) = parse_line(line, dep_type.clone()) {
-                    deps.push(Dependency::new(
-                        occurrence.name,
-                        occurrence.current_version,
-                        dep_type.clone(),
-                    ));
+                for line in content.lines() {
+                    if let Some(occurrence) = parse_line(line, dep_type.clone()) {
+                        deps.push(Dependency::new(
+                            occurrence.name,
+                            occurrence.current_version,
+                            dep_type.clone(),
+                        ));
+                    }
                 }
             }
         }
@@ -426,33 +511,65 @@ impl Plugin for DockerPlugin {
 
         for path in docker_manifest_paths(dir)? {
             let content = fs::read_to_string(&path)?;
-            let dep_type = if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(is_dockerfile_name)
-            {
-                DepType::Build
-            } else {
-                DepType::Normal
-            };
+            
+            let rewritten = if is_workflow_file(&path) {
+                // Handle GitHub Actions workflow files
+                content
+                    .lines()
+                    .map(|line| {
+                        let Some(occurrence) = parse_workflow_occurrence(line) else {
+                            return line.to_string();
+                        };
+                        let Some(dep) = to_update.iter().find(|dep| {
+                            dep.name == occurrence.name
+                                && dep.current_version == occurrence.current_version
+                        }) else {
+                            return line.to_string();
+                        };
+                        let Some(latest) = dep.latest_version.as_deref() else {
+                            return line.to_string();
+                        };
 
-            let rewritten = content
-                .lines()
-                .map(|line| {
-                    let Some(occurrence) = parse_line(line, dep_type.clone()) else {
-                        return line.to_string();
-                    };
-                    let Some(dep) = to_update.iter().find(|dep| {
-                        dep.name == occurrence.name
-                            && dep.current_version == occurrence.current_version
-                            && dep.dep_type == occurrence.dep_type
-                    }) else {
-                        return line.to_string();
-                    };
-                    rewrite_line(line, dep, dep_type.clone())
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+                        format!(
+                            "{}{}:{}{}",
+                            &line[..occurrence.replace_start],
+                            occurrence.name,
+                            latest,
+                            &line[occurrence.replace_end..],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                // Handle Dockerfile and docker-compose files
+                let dep_type = if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_dockerfile_name)
+                {
+                    DepType::Build
+                } else {
+                    DepType::Normal
+                };
+
+                content
+                    .lines()
+                    .map(|line| {
+                        let Some(occurrence) = parse_line(line, dep_type.clone()) else {
+                            return line.to_string();
+                        };
+                        let Some(dep) = to_update.iter().find(|dep| {
+                            dep.name == occurrence.name
+                                && dep.current_version == occurrence.current_version
+                                && dep.dep_type == occurrence.dep_type
+                        }) else {
+                            return line.to_string();
+                        };
+                        rewrite_line(line, dep, dep_type.clone())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
 
             let output = if content.ends_with('\n') {
                 format!("{rewritten}\n")
@@ -472,7 +589,7 @@ mod tests {
 
     use super::{
         DepType, docker_hub_repo, parse_compose_occurrence, parse_dockerfile_occurrence,
-        parse_image_reference, select_newer_tag, version_cmp,
+        parse_image_reference, parse_workflow_occurrence, select_newer_tag, version_cmp,
     };
 
     #[test]
@@ -533,5 +650,35 @@ mod tests {
     fn version_cmp_pads_missing_parts() {
         assert_eq!(version_cmp(&[1, 0], &[1]), Ordering::Equal);
         assert_eq!(version_cmp(&[1, 2], &[1, 1, 9]), Ordering::Greater);
+    }
+
+    #[test]
+    fn parse_workflow_occurrence_handles_basic_container() {
+        let parsed = parse_workflow_occurrence("      container: node:20-alpine")
+            .expect("failed to parse workflow container");
+        assert_eq!(parsed.name, "node");
+        assert_eq!(parsed.current_version, "20-alpine");
+        assert_eq!(parsed.dep_type, DepType::Normal);
+    }
+
+    #[test]
+    fn parse_workflow_occurrence_handles_quotes() {
+        let parsed = parse_workflow_occurrence("      container: \"python:3.11\"")
+            .expect("failed to parse quoted workflow container");
+        assert_eq!(parsed.name, "python");
+        assert_eq!(parsed.current_version, "3.11");
+    }
+
+    #[test]
+    fn parse_workflow_occurrence_handles_comments() {
+        let parsed = parse_workflow_occurrence("      container: ubuntu:22.04 # build image")
+            .expect("failed to parse workflow container with comment");
+        assert_eq!(parsed.name, "ubuntu");
+        assert_eq!(parsed.current_version, "22.04");
+    }
+
+    #[test]
+    fn parse_workflow_occurrence_ignores_comment_lines() {
+        assert!(parse_workflow_occurrence("      # container: node:20").is_none());
     }
 }
