@@ -86,10 +86,8 @@ fn parse_uses_value(line: &str) -> Option<(String, String)> {
 
     let uses_line = if let Some(rest) = trimmed.strip_prefix("uses:") {
         rest
-    } else if let Some(rest) = trimmed.strip_prefix("- uses:") {
-        rest
     } else {
-        return None;
+        trimmed.strip_prefix("- uses:")?
     };
 
     let raw = uses_line.trim();
@@ -529,7 +527,10 @@ mod tests {
 
     #[test]
     fn compare_action_refs_orders_semver() {
-        assert_eq!(compare_action_refs("v0.1.1", "v1.0.0"), Some(Ordering::Less));
+        assert_eq!(
+            compare_action_refs("v0.1.1", "v1.0.0"),
+            Some(Ordering::Less)
+        );
         assert_eq!(compare_action_refs("v1", "v1.0.0"), Some(Ordering::Equal));
     }
 
@@ -549,14 +550,15 @@ jobs:
 "#;
 
         let refs = parse_workflow_uses(yaml);
-        assert!(refs
-            .iter()
-            .any(|(name, version)| name == "actions/checkout" && version == "v4"));
-        assert!(refs
-            .iter()
-            .any(|(name, version)| name == "mcblair/configure-aws-profile-action" && version == "v0.1.1"));
-        assert!(refs
-            .iter()
-            .any(|(name, version)| name == "org/workflow/.github/workflows/reusable.yml" && version == "v2"));
+        assert!(
+            refs.iter()
+                .any(|(name, version)| name == "actions/checkout" && version == "v4")
+        );
+        assert!(refs.iter().any(
+            |(name, version)| name == "mcblair/configure-aws-profile-action" && version == "v0.1.1"
+        ));
+        assert!(refs.iter().any(|(name, version)| name
+            == "org/workflow/.github/workflows/reusable.yml"
+            && version == "v2"));
     }
 }

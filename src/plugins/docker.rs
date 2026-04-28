@@ -64,10 +64,10 @@ fn docker_manifest_paths(dir: &Path) -> Result<Vec<PathBuf>> {
             paths.push(path);
         }
     }
-    
+
     // Add GitHub Actions workflow files
     paths.extend(workflow_files(dir)?);
-    
+
     paths.sort();
     Ok(paths)
 }
@@ -423,7 +423,7 @@ impl Plugin for DockerPlugin {
 
         for path in docker_manifest_paths(dir)? {
             let content = fs::read_to_string(&path)?;
-            
+
             if is_workflow_file(&path) {
                 // Handle GitHub Actions workflow files
                 for line in content.lines() {
@@ -511,7 +511,7 @@ impl Plugin for DockerPlugin {
 
         for path in docker_manifest_paths(dir)? {
             let content = fs::read_to_string(&path)?;
-            
+
             let rewritten = if is_workflow_file(&path) {
                 // Handle GitHub Actions workflow files
                 content

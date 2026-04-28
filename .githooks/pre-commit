@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ensure hook runs from repository root.
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "[pre-commit] Running rustfmt check..."
+cargo fmt --all -- --check
+
+echo "[pre-commit] Running clippy check..."
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "[pre-commit] OK"

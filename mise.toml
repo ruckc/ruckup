@@ -34,3 +34,14 @@ else
 fi
 '''
 
+[tasks.bootstrap]
+description = "Configure local git hooks for pre-commit checks"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit
+echo "Git hooks configured: core.hooksPath=.githooks"
+'''
+
