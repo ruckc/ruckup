@@ -9,6 +9,7 @@ repository = "https://github.com/ruckc/ruckup"
 [dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"
+ignore = "0.4"
 clap = { version = "4.6.1", features = ["derive"] }
 colored = "3.1.1"
 dialoguer = "0.12.0"

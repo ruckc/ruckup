@@ -51,6 +51,38 @@ fn detect_plugins(dir: &Path, only: &Option<Vec<String>>) -> Vec<Box<dyn Plugin>
         .collect()
 }
 
+/// Walk the directory tree rooted at `root`, respecting `.gitignore`, and return
+/// every (plugin, directory) pair where a plugin detects a manifest.
+fn walk_all_plugin_dirs(
+    root: &Path,
+    only: &Option<Vec<String>>,
+) -> Vec<(Box<dyn Plugin>, PathBuf)> {
+    let mut results = Vec::new();
+    for entry in ignore::WalkBuilder::new(root)
+        .hidden(false) // include dotfiles/dot-dirs like .github/
+        .build()
+    {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            continue;
+        }
+        for plugin in detect_plugins(entry.path(), only) {
+            results.push((plugin, entry.path().to_path_buf()));
+        }
+    }
+    results
+}
+
+/// Build the section header label for a plugin, appending the relative path when
+/// the manifest lives in a subdirectory.
+fn plugin_label(plugin: &dyn Plugin, dir: &Path, root: &Path) -> String {
+    let base = plugin.display_name(dir);
+    match dir.strip_prefix(root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => format!("{} [{}]", base, rel.display()),
+        _ => base,
+    }
+}
+
 use plugin::DepType;
 
 fn map_report_format(value: &ReportFormatArg) -> report::ReportFormat {
@@ -375,8 +407,8 @@ async fn cmd_check(
     filter: &Option<Vec<String>>,
     config: &config::Config,
 ) -> Result<()> {
-    let plugins = detect_plugins(dir, only);
-    if plugins.is_empty() {
+    let plugin_dirs = walk_all_plugin_dirs(dir, only);
+    if plugin_dirs.is_empty() {
         println!(
             "{}",
             "No supported dependency files detected in the current directory.".yellow()
@@ -384,9 +416,9 @@ async fn cmd_check(
         return Ok(());
     }
 
-    for plugin in &plugins {
-        println!("{}", format!("── {} ──", plugin.display_name(dir)).bold());
-        let mut deps = plugin.check_updates(dir, config).await?;
+    for (plugin, pdir) in &plugin_dirs {
+        println!("{}", format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold());
+        let mut deps = plugin.check_updates(pdir, config).await?;
         let total_checked = deps.len();
         let failed_checks = deps.iter().filter(|d| d.check_failed).count();
         if let Some(names) = filter {
@@ -407,8 +439,8 @@ async fn cmd_check(
 }
 
 async fn cmd_list(dir: &Path, only: &Option<Vec<String>>) -> Result<()> {
-    let plugins = detect_plugins(dir, only);
-    if plugins.is_empty() {
+    let plugin_dirs = walk_all_plugin_dirs(dir, only);
+    if plugin_dirs.is_empty() {
         println!(
             "{}",
             "No supported dependency files detected in the current directory.".yellow()
@@ -416,9 +448,9 @@ async fn cmd_list(dir: &Path, only: &Option<Vec<String>>) -> Result<()> {
         return Ok(());
     }
 
-    for plugin in &plugins {
-        println!("{}", format!("── {} ──", plugin.display_name(dir)).bold());
-        let deps = plugin.list_dependencies(dir).await?;
+    for (plugin, pdir) in &plugin_dirs {
+        println!("{}", format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold());
+        let deps = plugin.list_dependencies(pdir).await?;
         if deps.is_empty() {
             println!("  No dependencies found.\n");
             continue;
@@ -457,8 +489,8 @@ async fn cmd_update(
     update_all: bool,
     config: &config::Config,
 ) -> Result<()> {
-    let plugins = detect_plugins(dir, only);
-    if plugins.is_empty() {
+    let plugin_dirs = walk_all_plugin_dirs(dir, only);
+    if plugin_dirs.is_empty() {
         println!(
             "{}",
             "No supported dependency files detected in the current directory.".yellow()
@@ -466,42 +498,42 @@ async fn cmd_update(
         return Ok(());
     }
 
-    let mut deps_by_plugin: Vec<Vec<Dependency>> = Vec::new();
-    let mut totals_by_plugin: Vec<usize> = Vec::new();
-    let mut failed_by_plugin: Vec<usize> = Vec::new();
+    let mut deps_by_entry: Vec<Vec<Dependency>> = Vec::new();
+    let mut totals_by_entry: Vec<usize> = Vec::new();
+    let mut failed_by_entry: Vec<usize> = Vec::new();
 
-    for plugin in &plugins {
-        let mut deps = plugin.check_updates(dir, config).await?;
+    for (plugin, pdir) in &plugin_dirs {
+        let mut deps = plugin.check_updates(pdir, config).await?;
         let total_checked = deps.len();
         let failed_checks = deps.iter().filter(|d| d.check_failed).count();
         if let Some(names) = filter {
             deps.retain(|d| names.iter().any(|n| d.name.contains(n.as_str())));
         }
-        deps_by_plugin.push(deps);
-        totals_by_plugin.push(total_checked);
-        failed_by_plugin.push(failed_checks);
+        deps_by_entry.push(deps);
+        totals_by_entry.push(total_checked);
+        failed_by_entry.push(failed_checks);
     }
 
-    let report_candidates: Vec<(String, Vec<Dependency>)> = plugins
+    let report_candidates: Vec<(String, Vec<Dependency>)> = plugin_dirs
         .iter()
-        .zip(deps_by_plugin.iter())
-        .filter_map(|(plugin, deps)| {
+        .zip(deps_by_entry.iter())
+        .filter_map(|((plugin, pdir), deps)| {
             let updatable: Vec<Dependency> =
                 deps.iter().filter(|d| d.has_update()).cloned().collect();
             if updatable.is_empty() {
                 None
             } else {
-                Some((plugin.name().to_string(), updatable))
+                Some((plugin_label(plugin.as_ref(), pdir, dir), updatable))
             }
         })
         .collect();
 
-    for (idx, plugin) in plugins.iter().enumerate() {
-        println!("{}", format!("── {} ──", plugin.display_name(dir)).bold());
+    for (idx, (plugin, pdir)) in plugin_dirs.iter().enumerate() {
+        println!("{}", format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold());
 
-        let deps = &deps_by_plugin[idx];
-        let total_checked = totals_by_plugin[idx];
-        let failed_checks = failed_by_plugin[idx];
+        let deps = &deps_by_entry[idx];
+        let total_checked = totals_by_entry[idx];
+        let failed_checks = failed_by_entry[idx];
         let updatable: Vec<_> = deps.iter().filter(|d| d.has_update()).collect();
 
         if failed_checks > 0 {
@@ -532,18 +564,19 @@ async fn cmd_update(
         );
     }
 
-    for (idx, plugin) in plugins.iter().enumerate() {
-        let deps = &deps_by_plugin[idx];
+    for (idx, (plugin, pdir)) in plugin_dirs.iter().enumerate() {
+        let deps = &deps_by_entry[idx];
         let updatable: Vec<Dependency> = deps.iter().filter(|d| d.has_update()).cloned().collect();
         if updatable.is_empty() {
             continue;
         }
 
+        let label = plugin_label(plugin.as_ref(), pdir, dir);
         let selected_names: Vec<String> = if update_all {
             updatable.iter().map(|d| d.name.clone()).collect()
         } else {
             let selected = select_dependencies_interactive(
-                plugin.display_name(dir).as_ref(),
+                label.as_ref(),
                 &updatable,
                 &report_candidates,
             )
@@ -557,7 +590,7 @@ async fn cmd_update(
             selected
         };
 
-        plugin.update(dir, &selected_names, config).await?;
+        plugin.update(pdir, &selected_names, config).await?;
         println!(
             "  {} Updated {} dependencies.\n",
             "✓".green(),
@@ -576,8 +609,8 @@ async fn cmd_report(
     open: bool,
     config: &config::Config,
 ) -> Result<()> {
-    let plugins = detect_plugins(dir, only);
-    if plugins.is_empty() {
+    let plugin_dirs = walk_all_plugin_dirs(dir, only);
+    if plugin_dirs.is_empty() {
         println!(
             "{}",
             "No supported dependency files detected in the current directory.".yellow()
@@ -588,10 +621,10 @@ async fn cmd_report(
     let mut plugin_reports = Vec::new();
     let mut total_candidates = 0usize;
 
-    for plugin in &plugins {
-        println!("{}", format!("── {} ──", plugin.display_name(dir)).bold());
+    for (plugin, pdir) in &plugin_dirs {
+        println!("{}", format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold());
 
-        let mut deps = plugin.check_updates(dir, config).await?;
+        let mut deps = plugin.check_updates(pdir, config).await?;
         if let Some(names) = filter {
             deps.retain(|d| names.iter().any(|n| d.name.contains(n.as_str())));
         }
@@ -609,10 +642,11 @@ async fn cmd_report(
             updatable.len()
         );
 
-        let entries = report::build_dependency_reports(plugin.name(), updatable).await;
+        let label = plugin_label(plugin.as_ref(), pdir, dir);
+        let entries = report::build_dependency_reports(&label, updatable).await;
         let security_findings = report::plugin_security_findings(plugin.name()).await;
         plugin_reports.push(report::PluginReport {
-            plugin: plugin.name().to_string(),
+            plugin: label,
             security_findings,
             dependencies: entries,
         });
