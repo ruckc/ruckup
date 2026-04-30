@@ -63,7 +63,7 @@ fn walk_all_plugin_dirs(
         .build()
     {
         let Ok(entry) = entry else { continue };
-        if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+        if !entry.file_type().is_some_and(|ft| ft.is_dir()) {
             continue;
         }
         for plugin in detect_plugins(entry.path(), only) {
@@ -417,7 +417,10 @@ async fn cmd_check(
     }
 
     for (plugin, pdir) in &plugin_dirs {
-        println!("{}", format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold());
+        println!(
+            "{}",
+            format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold()
+        );
         let mut deps = plugin.check_updates(pdir, config).await?;
         let total_checked = deps.len();
         let failed_checks = deps.iter().filter(|d| d.check_failed).count();
@@ -449,7 +452,10 @@ async fn cmd_list(dir: &Path, only: &Option<Vec<String>>) -> Result<()> {
     }
 
     for (plugin, pdir) in &plugin_dirs {
-        println!("{}", format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold());
+        println!(
+            "{}",
+            format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold()
+        );
         let deps = plugin.list_dependencies(pdir).await?;
         if deps.is_empty() {
             println!("  No dependencies found.\n");
@@ -529,7 +535,10 @@ async fn cmd_update(
         .collect();
 
     for (idx, (plugin, pdir)) in plugin_dirs.iter().enumerate() {
-        println!("{}", format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold());
+        println!(
+            "{}",
+            format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold()
+        );
 
         let deps = &deps_by_entry[idx];
         let total_checked = totals_by_entry[idx];
@@ -575,12 +584,9 @@ async fn cmd_update(
         let selected_names: Vec<String> = if update_all {
             updatable.iter().map(|d| d.name.clone()).collect()
         } else {
-            let selected = select_dependencies_interactive(
-                label.as_ref(),
-                &updatable,
-                &report_candidates,
-            )
-            .await?;
+            let selected =
+                select_dependencies_interactive(label.as_ref(), &updatable, &report_candidates)
+                    .await?;
 
             if selected.is_empty() {
                 println!("  No dependencies selected.\n");
@@ -622,7 +628,10 @@ async fn cmd_report(
     let mut total_candidates = 0usize;
 
     for (plugin, pdir) in &plugin_dirs {
-        println!("{}", format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold());
+        println!(
+            "{}",
+            format!("── {} ──", plugin_label(plugin.as_ref(), pdir, dir)).bold()
+        );
 
         let mut deps = plugin.check_updates(pdir, config).await?;
         if let Some(names) = filter {
